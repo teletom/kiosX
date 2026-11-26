@@ -126,6 +126,7 @@ while true; do
         --disable-translate \
         --disable-features=Translate,TranslateUI \
         --autoplay-policy=no-user-gesture-required \
+        --use-fake-ui-for-media-stream \
         --check-for-update-interval=31536000 \
         --disable-component-update \
         --password-store=basic \

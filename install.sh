@@ -203,6 +203,12 @@ install_chromium() {
 
 install_chromium
 
+# Bei Snap-Chromium Kamera- & Mikrofon-Interfaces explizit verbinden (idempotent)
+if command -v snap &>/dev/null && snap list chromium &>/dev/null; then
+    snap connect chromium:camera :camera 2>/dev/null || true
+    snap connect chromium:audio-record :audio-record 2>/dev/null || true
+fi
+
 # 4. Gruppenmitgliedschaften und systemd-Linger fuer PipeWire/X11 einrichten
 log "Konfiguriere Gruppen fuer '${KIOSK_USER}'..."
 for grp in audio video input render tty; do
