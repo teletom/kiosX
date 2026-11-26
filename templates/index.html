@@ -1,0 +1,921 @@
+<!DOCTYPE html>
+<html lang="de" data-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>kiosX &ndash; Kiosk-Konfiguration ({{ hardware.system.hostname }})</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <style>
+    /* Schlankes Custom-Styling & Offline-Fallback falls kein Internetzugang besteht */
+    :root {
+      --kiosx-accent: #2563eb;
+      --kiosx-ok: #16a34a;
+      --kiosx-warn: #d97706;
+      --kiosx-err: #dc2626;
+      --kiosx-radius: 0.75rem;
+    }
+
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      margin: 0;
+      padding-bottom: 5rem;
+    }
+
+    main.container {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 1.25rem 1rem 3rem;
+    }
+
+    .topbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      margin-bottom: 1.5rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--pico-muted-border-color, #d1d5db);
+    }
+
+    .brand {
+      display: flex;
+      align-items: baseline;
+      gap: 0.65rem;
+      margin: 0;
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 1.75rem;
+      letter-spacing: -0.02em;
+    }
+
+    .brand small {
+      opacity: 0.7;
+      font-size: 0.9rem;
+    }
+
+    .status-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      align-items: center;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.78rem;
+      font-weight: 600;
+      padding: 0.25rem 0.6rem;
+      border-radius: 999px;
+      background: var(--pico-card-sectioning-background-color, #eef2f7);
+      border: 1px solid var(--pico-muted-border-color, #d1d5db);
+    }
+
+    .dot {
+      width: 0.55rem;
+      height: 0.55rem;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .dot.ok   { background: var(--kiosx-ok); }
+    .dot.warn { background: var(--kiosx-warn); }
+    .dot.err  { background: var(--kiosx-err); }
+
+    article.card {
+      border-radius: var(--kiosx-radius);
+      margin-bottom: 1.25rem;
+      padding: 1.25rem 1.4rem;
+    }
+
+    article.card > header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      margin: -1.25rem -1.4rem 1.15rem;
+      padding: 0.9rem 1.4rem;
+      border-top-left-radius: var(--kiosx-radius);
+      border-top-right-radius: var(--kiosx-radius);
+    }
+
+    article.card > header h2 {
+      margin: 0;
+      font-size: 1.1rem;
+    }
+
+    .hw-alert {
+      font-size: 0.86rem;
+      padding: 0.65rem 0.85rem;
+      border-radius: 0.5rem;
+      margin-bottom: 1rem;
+      border-left: 4px solid var(--kiosx-warn);
+      background: rgba(217, 119, 6, 0.1);
+    }
+
+    .row-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      align-items: center;
+      margin-top: 0.5rem;
+    }
+
+    .row-actions button {
+      width: auto;
+      margin-bottom: 0;
+    }
+
+    .volume-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.25rem;
+    }
+
+    .volume-value {
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      min-width: 3.5rem;
+      text-align: right;
+    }
+
+    .save-bar {
+      position: sticky;
+      bottom: 0.75rem;
+      z-index: 20;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      justify-content: flex-end;
+      align-items: center;
+      padding: 0.85rem 1.1rem;
+      border-radius: var(--kiosx-radius);
+      background: var(--pico-card-background-color, #ffffff);
+      border: 1px solid var(--pico-muted-border-color, #d1d5db);
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16);
+    }
+
+    .save-bar button {
+      margin-bottom: 0;
+      width: auto;
+    }
+
+    .save-hint {
+      margin-right: auto;
+      font-size: 0.85rem;
+      opacity: 0.75;
+    }
+
+    /* Toast-Benachrichtigungen */
+    #toast-container {
+      position: fixed;
+      top: 1rem;
+      right: 1rem;
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+      max-width: min(420px, calc(100vw - 2rem));
+    }
+
+    .toast {
+      padding: 0.85rem 1rem;
+      border-radius: 0.65rem;
+      color: #ffffff;
+      font-size: 0.9rem;
+      line-height: 1.35;
+      box-shadow: 0 12px 26px rgba(0, 0, 0, 0.25);
+      animation: toastIn 0.2s ease-out;
+    }
+
+    .toast.success { background: #15803d; }
+    .toast.warning { background: #b45309; }
+    .toast.error   { background: #b91c1c; }
+    .toast.info    { background: #1d4ed8; }
+
+    .toast-details {
+      margin-top: 0.45rem;
+      padding-top: 0.45rem;
+      border-top: 1px solid rgba(255, 255, 255, 0.25);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.76rem;
+      white-space: pre-wrap;
+      max-height: 8rem;
+      overflow-y: auto;
+    }
+
+    @keyframes toastIn {
+      from { opacity: 0; transform: translateY(-8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    button.active-test {
+      background-color: var(--kiosx-err) !important;
+      border-color: var(--kiosx-err) !important;
+      color: #fff !important;
+    }
+
+    @media (max-width: 640px) {
+      .save-bar { justify-content: stretch; }
+      .save-bar button { width: 100%; }
+      .save-hint { width: 100%; margin-right: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
+
+  <main class="container">
+    <div class="topbar">
+      <div class="brand">
+        <h1>kiosX</h1>
+        <small>{{ hardware.system.hostname }} &middot; {{ hardware.system.ip }}:{{ hardware.system.port }}</small>
+      </div>
+      <div class="status-bar">
+        <span class="badge" id="badge-x11" title="X11 Display-Status">
+          <span class="dot {{ 'ok' if hardware.displays.available else 'warn' }}"></span>
+          X11: {{ hardware.displays.displays|length }} Monitor(e)
+        </span>
+        <span class="badge" id="badge-audio" title="PipeWire Audio-Status">
+          <span class="dot {{ 'ok' if hardware.audio.available else 'warn' }}"></span>
+          Audio: {{ hardware.audio.cards|length }} Karte(n)
+        </span>
+        <button type="button" id="btn-refresh-hw" class="outline secondary" style="padding: 0.3rem 0.75rem; font-size: 0.82rem; margin: 0;">
+          Hardware neu einlesen
+        </button>
+      </div>
+    </div>
+
+    <form id="kiosk-form" novalidate>
+      <!-- 1. Kiosk-URL & Browser -->
+      <article class="card">
+        <header>
+          <h2>1. Kiosk-URL &amp; Browser</h2>
+          <small>Chromium Kiosk-Modus</small>
+        </header>
+
+        <label for="kiosk-url">
+          Start-URL
+          <input
+            type="url"
+            id="kiosk-url"
+            name="url"
+            value="{{ config.url }}"
+            placeholder="https://dashboard.example.com"
+            required
+          >
+        </label>
+
+        <div class="row-actions">
+          <button type="button" id="btn-restart-browser" class="secondary outline">
+            Browser neu starten
+          </button>
+          <small style="opacity: 0.75;">
+            Nach einer URL-&Auml;nderung zuerst speichern, dann Browser neu starten.
+          </small>
+        </div>
+      </article>
+
+      <!-- 2. Display-Konfiguration -->
+      <article class="card">
+        <header>
+          <h2>2. Display-Konfiguration</h2>
+          <small>xrandr Live-Umschaltung</small>
+        </header>
+
+        <div id="display-alert" class="hw-alert" {% if hardware.displays.available and hardware.displays.displays %}hidden{% endif %}>
+          {% if not hardware.displays.available %}
+            X11 / xrandr derzeit nicht erreichbar: {{ hardware.displays.error }}
+          {% else %}
+            Derzeit ist kein Monitor verbunden. Einstellungen k&ouml;nnen dennoch gespeichert werden.
+          {% endif %}
+        </div>
+
+        <div class="grid">
+          <label for="primary-output">
+            Prim&auml;res Display
+            <select id="primary-output" name="primary_output"></select>
+          </label>
+
+          <label for="display-resolution">
+            Aufl&ouml;sung
+            <select id="display-resolution" name="resolution"></select>
+          </label>
+
+          <label for="display-rotation">
+            Drehung
+            <select id="display-rotation" name="rotation">
+              <option value="normal"   {{ 'selected' if config.display.rotation == 'normal' }}>0&deg; (Normal)</option>
+              <option value="right"    {{ 'selected' if config.display.rotation == 'right' }}>90&deg; (Rechts)</option>
+              <option value="inverted" {{ 'selected' if config.display.rotation == 'inverted' }}>180&deg; (Kopfstehend)</option>
+              <option value="left"     {{ 'selected' if config.display.rotation == 'left' }}>270&deg; (Links)</option>
+            </select>
+          </label>
+        </div>
+
+        <hr>
+
+        <div class="grid">
+          <label for="secondary-output">
+            Zweites Display (optional)
+            <select id="secondary-output" name="secondary_output"></select>
+          </label>
+
+          <label for="secondary-mode">
+            Modus Zweitdisplay
+            <select id="secondary-mode" name="secondary_mode">
+              <option value="off"    {{ 'selected' if config.display.secondary_mode == 'off' }}>Aus (deaktiviert)</option>
+              <option value="right"  {{ 'selected' if config.display.secondary_mode == 'right' }}>Rechts erweitern</option>
+              <option value="left"   {{ 'selected' if config.display.secondary_mode == 'left' }}>Links erweitern</option>
+              <option value="mirror" {{ 'selected' if config.display.secondary_mode == 'mirror' }}>Spiegeln (Mirror)</option>
+            </select>
+          </label>
+        </div>
+      </article>
+
+      <!-- 3. Touch-Geraet & Kalibrierung -->
+      <article class="card">
+        <header>
+          <h2>3. Touch-Ger&auml;t &amp; Kalibrierung</h2>
+          <small>xinput Transformation Matrix</small>
+        </header>
+
+        <div id="touch-alert" class="hw-alert" {% if hardware.touch.available and hardware.touch.devices %}hidden{% endif %}>
+          {% if not hardware.touch.available %}
+            xinput derzeit nicht erreichbar: {{ hardware.touch.error }}
+          {% else %}
+            Keine Touch-/Pointer-Eingabeger&auml;te erkannt.
+          {% endif %}
+        </div>
+
+        <div class="grid">
+          <label for="touch-device">
+            Touch-Eingabeger&auml;t
+            <select id="touch-device" name="touch_device"></select>
+          </label>
+
+          <label for="touch-rotation">
+            Touch-Ausrichtung
+            <select id="touch-rotation" name="touch_rotation">
+              <option value="0"   {{ 'selected' if config.touch.rotation == '0' }}>0&deg; (Normal)</option>
+              <option value="90"  {{ 'selected' if config.touch.rotation == '90' }}>90&deg; (passend zu Rechts)</option>
+              <option value="180" {{ 'selected' if config.touch.rotation == '180' }}>180&deg; (Kopfstehend)</option>
+              <option value="270" {{ 'selected' if config.touch.rotation == '270' }}>270&deg; (passend zu Links)</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="row-actions">
+          <button
+            type="button"
+            id="btn-touch-test"
+            class="outline {{ 'active-test' if hardware.system.touch_test_active }}"
+            data-active="{{ 'true' if hardware.system.touch_test_active else 'false' }}"
+          >
+            {% if hardware.system.touch_test_active %}
+              Touch-Ecken-Test beenden
+            {% else %}
+              Touch-Ecken-Test starten
+            {% endif %}
+          </button>
+
+          <button type="button" id="btn-sync-touch-rot" class="secondary outline">
+            An Display-Drehung angleichen
+          </button>
+        </div>
+      </article>
+
+      <!-- 4. Audio-Ausgabe -->
+      <article class="card">
+        <header>
+          <h2>4. Audio-Ausgabe</h2>
+          <small>PipeWire / pactl</small>
+        </header>
+
+        <div id="audio-alert" class="hw-alert" {% if hardware.audio.available and hardware.audio.cards %}hidden{% endif %}>
+          {% if not hardware.audio.available %}
+            PipeWire / pactl derzeit nicht erreichbar: {{ hardware.audio.error }}
+          {% else %}
+            Keine Soundkarten erkannt.
+          {% endif %}
+        </div>
+
+        <div class="grid">
+          <label for="audio-card">
+            Soundkarte
+            <select id="audio-card" name="audio_card"></select>
+          </label>
+
+          <label for="audio-profile">
+            Ausgabe-Profil (HDMI vs. Line-Out)
+            <select id="audio-profile" name="audio_profile"></select>
+          </label>
+        </div>
+
+        <div>
+          <div class="volume-header">
+            <label for="audio-volume" style="margin: 0;">Lautst&auml;rke</label>
+            <span class="volume-value" id="audio-volume-label">{{ config.audio.volume }} %</span>
+          </div>
+          <input
+            type="range"
+            id="audio-volume"
+            name="audio_volume"
+            min="0"
+            max="100"
+            step="1"
+            value="{{ config.audio.volume }}"
+          >
+        </div>
+
+        <div class="row-actions">
+          <button type="button" id="btn-test-audio" class="secondary outline">
+            Test-Ton abspielen
+          </button>
+        </div>
+      </article>
+
+      <!-- Speichern-Leiste -->
+      <div class="save-bar">
+        <span class="save-hint">
+          Konfiguration: <code>{{ hardware.system.config_path }}</code>
+        </span>
+        <button type="submit" id="btn-save">
+          Speichern &amp; Live anwenden
+        </button>
+      </div>
+    </form>
+  </main>
+
+  <script>
+    let currentConfig = {{ config | tojson }};
+    let currentHardware = {{ hardware | tojson }};
+
+    const ROT_MAP_DISPLAY_TO_TOUCH = {
+      normal: "0",
+      right: "90",
+      inverted: "180",
+      left: "270",
+    };
+
+    const $ = (id) => document.getElementById(id);
+
+    function showToast(message, type = "info", details = "") {
+      const container = $("toast-container");
+      const toast = document.createElement("div");
+      toast.className = `toast ${type}`;
+      toast.textContent = message;
+
+      if (details) {
+        const pre = document.createElement("div");
+        pre.className = "toast-details";
+        pre.textContent = details;
+        toast.appendChild(pre);
+      }
+
+      container.appendChild(toast);
+      const ttl = type === "error" ? 7000 : details ? 6000 : 3800;
+      setTimeout(() => {
+        toast.style.transition = "opacity 0.25s ease";
+        toast.style.opacity = "0";
+        setTimeout(() => toast.remove(), 260);
+      }, ttl);
+    }
+
+    function setBusy(btn, busy, busyText) {
+      if (!btn) return;
+      if (busy) {
+        btn.dataset.origText = btn.textContent;
+        btn.setAttribute("aria-busy", "true");
+        btn.disabled = true;
+        if (busyText) btn.textContent = busyText;
+      } else {
+        btn.removeAttribute("aria-busy");
+        btn.disabled = false;
+        if (btn.dataset.origText) btn.textContent = btn.dataset.origText;
+      }
+    }
+
+    function populateDisplays(selectedPrimary, selectedRes, selectedSecondary) {
+      const displays = (currentHardware.displays && currentHardware.displays.displays) || [];
+      const primarySel = $("primary-output");
+      const secondarySel = $("secondary-output");
+
+      primarySel.innerHTML = "";
+      const autoPrimaryOpt = document.createElement("option");
+      autoPrimaryOpt.value = "";
+      autoPrimaryOpt.textContent = displays.length ? "Automatisch (erster verbundener Monitor)" : "Kein Monitor erkannt (Auto)";
+      primarySel.appendChild(autoPrimaryOpt);
+
+      displays.forEach((d) => {
+        const opt = document.createElement("option");
+        opt.value = d.name;
+        const modeInfo = d.current_mode ? ` – ${d.current_mode}` : "";
+        const primTag = d.primary ? " [aktiv primär]" : "";
+        opt.textContent = `${d.name}${modeInfo}${primTag}`;
+        primarySel.appendChild(opt);
+      });
+
+      if (selectedPrimary && !displays.some((d) => d.name === selectedPrimary)) {
+        const savedOpt = document.createElement("option");
+        savedOpt.value = selectedPrimary;
+        savedOpt.textContent = `${selectedPrimary} (gespeichert, z. Zt. nicht verbunden)`;
+        primarySel.appendChild(savedOpt);
+      }
+      primarySel.value = selectedPrimary || "";
+
+      // Zweites Display befuellen
+      secondarySel.innerHTML = "";
+      const noneOpt = document.createElement("option");
+      noneOpt.value = "";
+      noneOpt.textContent = "Kein zweites Display";
+      secondarySel.appendChild(noneOpt);
+
+      displays.forEach((d) => {
+        const opt = document.createElement("option");
+        opt.value = d.name;
+        opt.textContent = d.name + (d.current_mode ? ` (${d.current_mode})` : "");
+        secondarySel.appendChild(opt);
+      });
+
+      if (selectedSecondary && !displays.some((d) => d.name === selectedSecondary)) {
+        const savedSec = document.createElement("option");
+        savedSec.value = selectedSecondary;
+        savedSec.textContent = `${selectedSecondary} (gespeichert, nicht verbunden)`;
+        secondarySel.appendChild(savedSec);
+      }
+      secondarySel.value = selectedSecondary || "";
+
+      populateResolutions(primarySel.value, selectedRes);
+    }
+
+    function populateResolutions(outputName, selectedRes) {
+      const displays = (currentHardware.displays && currentHardware.displays.displays) || [];
+      const resSel = $("display-resolution");
+      resSel.innerHTML = "";
+
+      const autoOpt = document.createElement("option");
+      autoOpt.value = "auto";
+      autoOpt.textContent = "Automatisch (bevorzugter Modus)";
+      resSel.appendChild(autoOpt);
+
+      let target = displays.find((d) => d.name === outputName);
+      if (!target && !outputName && displays.length > 0) {
+        target = displays[0];
+      }
+
+      const modes = target ? target.resolutions : [];
+      modes.forEach((m) => {
+        const opt = document.createElement("option");
+        opt.value = m;
+        opt.textContent = m + (target && target.current_mode === m ? " (aktuell)" : "");
+        resSel.appendChild(opt);
+      });
+
+      if (selectedRes && selectedRes !== "auto" && !modes.includes(selectedRes)) {
+        const savedOpt = document.createElement("option");
+        savedOpt.value = selectedRes;
+        savedOpt.textContent = `${selectedRes} (gespeichert)`;
+        resSel.appendChild(savedOpt);
+      }
+      resSel.value = selectedRes || "auto";
+    }
+
+    function populateTouchDevices(selectedDevice) {
+      const devices = (currentHardware.touch && currentHardware.touch.devices) || [];
+      const sel = $("touch-device");
+      sel.innerHTML = "";
+
+      const noneOpt = document.createElement("option");
+      noneOpt.value = "";
+      noneOpt.textContent = "Kein Touch-Gerät ausgewählt";
+      sel.appendChild(noneOpt);
+
+      const touchGroup = devices.filter((d) => d.is_touch);
+      const otherGroup = devices.filter((d) => !d.is_touch);
+
+      if (touchGroup.length) {
+        const og = document.createElement("optgroup");
+        og.label = "Erkannte Touch-Geräte";
+        touchGroup.forEach((d) => {
+          const opt = document.createElement("option");
+          opt.value = d.name;
+          opt.textContent = `${d.name} (ID ${d.id})`;
+          og.appendChild(opt);
+        });
+        sel.appendChild(og);
+      }
+
+      if (otherGroup.length) {
+        const og = document.createElement("optgroup");
+        og.label = "Weitere Pointer-Geräte";
+        otherGroup.forEach((d) => {
+          const opt = document.createElement("option");
+          opt.value = d.name;
+          opt.textContent = `${d.name} (ID ${d.id})`;
+          og.appendChild(opt);
+        });
+        sel.appendChild(og);
+      }
+
+      if (selectedDevice && !devices.some((d) => d.name === selectedDevice)) {
+        const savedOpt = document.createElement("option");
+        savedOpt.value = selectedDevice;
+        savedOpt.textContent = `${selectedDevice} (gespeichert, z. Zt. nicht verbunden)`;
+        sel.appendChild(savedOpt);
+      }
+      sel.value = selectedDevice || "";
+    }
+
+    function populateAudioCards(selectedCard, selectedProfile) {
+      const cards = (currentHardware.audio && currentHardware.audio.cards) || [];
+      const cardSel = $("audio-card");
+      cardSel.innerHTML = "";
+
+      const defOpt = document.createElement("option");
+      defOpt.value = "";
+      defOpt.textContent = cards.length ? "Standard-Soundkarte beibehalten" : "Keine Soundkarte erkannt";
+      cardSel.appendChild(defOpt);
+
+      cards.forEach((c) => {
+        const opt = document.createElement("option");
+        opt.value = c.name;
+        opt.textContent = `${c.description} (${c.name})`;
+        cardSel.appendChild(opt);
+      });
+
+      if (selectedCard && !cards.some((c) => c.name === selectedCard)) {
+        const savedOpt = document.createElement("option");
+        savedOpt.value = selectedCard;
+        savedOpt.textContent = `${selectedCard} (gespeichert, nicht verbunden)`;
+        cardSel.appendChild(savedOpt);
+      }
+      cardSel.value = selectedCard || "";
+
+      populateAudioProfiles(cardSel.value, selectedProfile);
+    }
+
+    function populateAudioProfiles(cardName, selectedProfile) {
+      const cards = (currentHardware.audio && currentHardware.audio.cards) || [];
+      const profSel = $("audio-profile");
+      profSel.innerHTML = "";
+
+      const defOpt = document.createElement("option");
+      defOpt.value = "";
+      defOpt.textContent = "Aktuelles Profil beibehalten";
+      profSel.appendChild(defOpt);
+
+      const card = cards.find((c) => c.name === cardName);
+      const profiles = card ? card.profiles : [];
+
+      profiles.forEach((p) => {
+        const opt = document.createElement("option");
+        opt.value = p.name;
+        const availSuffix = p.available ? "" : " [nicht verbunden]";
+        const activeSuffix = card && card.active_profile === p.name ? " ★ aktiv" : "";
+        opt.textContent = `[${p.kind}] ${p.description}${availSuffix}${activeSuffix}`;
+        profSel.appendChild(opt);
+      });
+
+      if (selectedProfile && !profiles.some((p) => p.name === selectedProfile)) {
+        const savedOpt = document.createElement("option");
+        savedOpt.value = selectedProfile;
+        savedOpt.textContent = `${selectedProfile} (gespeichert)`;
+        profSel.appendChild(savedOpt);
+      }
+      profSel.value = selectedProfile || "";
+    }
+
+    function updateStatusBadges() {
+      const disp = currentHardware.displays || {};
+      const aud = currentHardware.audio || {};
+      const touch = currentHardware.touch || {};
+
+      $("badge-x11").innerHTML = `<span class="dot ${disp.available ? "ok" : "warn"}"></span>X11: ${(disp.displays || []).length} Monitor(e)`;
+      $("badge-audio").innerHTML = `<span class="dot ${aud.available ? "ok" : "warn"}"></span>Audio: ${(aud.cards || []).length} Karte(n)`;
+
+      const dispAlert = $("display-alert");
+      if (!disp.available) {
+        dispAlert.textContent = `X11 / xrandr derzeit nicht erreichbar: ${disp.error || ""}`;
+        dispAlert.hidden = false;
+      } else if (!(disp.displays || []).length) {
+        dispAlert.textContent = "Derzeit ist kein Monitor verbunden. Einstellungen können dennoch gespeichert werden.";
+        dispAlert.hidden = false;
+      } else {
+        dispAlert.hidden = true;
+      }
+
+      const touchAlert = $("touch-alert");
+      if (!touch.available) {
+        touchAlert.textContent = `xinput derzeit nicht erreichbar: ${touch.error || ""}`;
+        touchAlert.hidden = false;
+      } else if (!(touch.devices || []).length) {
+        touchAlert.textContent = "Keine Touch-/Pointer-Eingabegeräte erkannt.";
+        touchAlert.hidden = false;
+      } else {
+        touchAlert.hidden = true;
+      }
+
+      const audioAlert = $("audio-alert");
+      if (!aud.available) {
+        audioAlert.textContent = `PipeWire / pactl derzeit nicht erreichbar: ${aud.error || ""}`;
+        audioAlert.hidden = false;
+      } else if (!(aud.cards || []).length) {
+        audioAlert.textContent = "Keine Soundkarten erkannt.";
+        audioAlert.hidden = false;
+      } else {
+        audioAlert.hidden = true;
+      }
+    }
+
+    function updateTouchTestButton(active) {
+      const btn = $("btn-touch-test");
+      btn.dataset.active = active ? "true" : "false";
+      btn.textContent = active ? "Touch-Ecken-Test beenden" : "Touch-Ecken-Test starten";
+      btn.classList.toggle("active-test", Boolean(active));
+    }
+
+    function initSelectorsFromState() {
+      populateDisplays(
+        currentConfig.display.primary_output,
+        currentConfig.display.resolution,
+        currentConfig.display.secondary_output
+      );
+      populateTouchDevices(currentConfig.touch.device);
+      populateAudioCards(currentConfig.audio.card, currentConfig.audio.profile);
+      updateStatusBadges();
+    }
+
+    // Event-Listener
+    $("primary-output").addEventListener("change", (e) => {
+      populateResolutions(e.target.value, "auto");
+    });
+
+    $("audio-card").addEventListener("change", (e) => {
+      const card = (currentHardware.audio.cards || []).find((c) => c.name === e.target.value);
+      const defaultProf = card ? card.active_profile : "";
+      populateAudioProfiles(e.target.value, defaultProf);
+    });
+
+    $("audio-volume").addEventListener("input", (e) => {
+      $("audio-volume-label").textContent = `${e.target.value} %`;
+    });
+
+    $("btn-sync-touch-rot").addEventListener("click", () => {
+      const dispRot = $("display-rotation").value;
+      const mapped = ROT_MAP_DISPLAY_TO_TOUCH[dispRot] || "0";
+      $("touch-rotation").value = mapped;
+      showToast(`Touch-Ausrichtung auf ${mapped}° angepasst (passend zu Display-Drehung).`, "info");
+    });
+
+    // Speichern ohne Seiten-Reload
+    $("kiosk-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = $("btn-save");
+      setBusy(btn, true, "Speichere & wende an...");
+
+      const payload = {
+        url: $("kiosk-url").value.trim(),
+        display: {
+          primary_output: $("primary-output").value,
+          resolution: $("display-resolution").value,
+          rotation: $("display-rotation").value,
+          secondary_output: $("secondary-output").value,
+          secondary_mode: $("secondary-mode").value,
+        },
+        touch: {
+          device: $("touch-device").value,
+          rotation: $("touch-rotation").value,
+        },
+        audio: {
+          card: $("audio-card").value,
+          profile: $("audio-profile").value,
+          volume: parseInt($("audio-volume").value, 10) || 0,
+        },
+      };
+
+      try {
+        const res = await fetch("/save", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+
+        if (!res.ok || !data.ok) {
+          showToast(data.message || "Fehler beim Speichern.", "error", (data.warnings || []).join("\n"));
+        } else {
+          currentConfig = data.config || payload;
+          const warnText = (data.warnings || []).join("\n");
+          showToast(data.message || "Gespeichert.", warnText ? "warning" : "success", warnText);
+        }
+      } catch (err) {
+        showToast(`Netzwerkfehler beim Speichern: ${err.message}`, "error");
+      } finally {
+        setBusy(btn, false);
+      }
+    });
+
+    // Test-Ton abspielen
+    $("btn-test-audio").addEventListener("click", async () => {
+      const btn = $("btn-test-audio");
+      setBusy(btn, true, "Spiele Test-Ton...");
+      try {
+        const res = await fetch("/test-audio", { method: "POST" });
+        const data = await res.json();
+        showToast(data.message || "Test-Ton ausgefuehrt.", res.ok && data.ok ? "success" : "error");
+      } catch (err) {
+        showToast(`Fehler beim Audio-Test: ${err.message}`, "error");
+      } finally {
+        setBusy(btn, false);
+      }
+    });
+
+    // Touch-Ecken-Test umschalten
+    $("btn-touch-test").addEventListener("click", async () => {
+      const btn = $("btn-touch-test");
+      const currentlyActive = btn.dataset.active === "true";
+      setBusy(btn, true, currentlyActive ? "Beende Test..." : "Starte Test...");
+      try {
+        const res = await fetch("/touch-test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: currentlyActive ? "stop" : "start" }),
+        });
+        const data = await res.json();
+        setBusy(btn, false);
+        if (res.ok && data.ok) {
+          updateTouchTestButton(Boolean(data.active));
+          showToast(data.message, "success");
+        } else {
+          showToast(data.message || "Touch-Test konnte nicht umgeschaltet werden.", "error");
+        }
+      } catch (err) {
+        setBusy(btn, false);
+        showToast(`Fehler beim Touch-Test: ${err.message}`, "error");
+      }
+    });
+
+    // Browser neu starten
+    $("btn-restart-browser").addEventListener("click", async () => {
+      const btn = $("btn-restart-browser");
+      setBusy(btn, true, "Starte neu...");
+      try {
+        const res = await fetch("/restart-browser", { method: "POST" });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+          updateTouchTestButton(false);
+          showToast(data.message, "success");
+        } else {
+          showToast(data.message || "Browser-Neustart fehlgeschlagen.", "error");
+        }
+      } catch (err) {
+        showToast(`Fehler beim Browser-Neustart: ${err.message}`, "error");
+      } finally {
+        setBusy(btn, false);
+      }
+    });
+
+    // Hardware dynamisch neu einlesen
+    $("btn-refresh-hw").addEventListener("click", async () => {
+      const btn = $("btn-refresh-hw");
+      setBusy(btn, true, "Lese Hardware...");
+      try {
+        const res = await fetch("/api/hardware");
+        const data = await res.json();
+        if (res.ok && data.ok) {
+          currentHardware = data.hardware;
+          const prevPrimary = $("primary-output").value;
+          const prevRes = $("display-resolution").value;
+          const prevSec = $("secondary-output").value;
+          const prevTouch = $("touch-device").value;
+          const prevCard = $("audio-card").value;
+          const prevProf = $("audio-profile").value;
+
+          populateDisplays(prevPrimary, prevRes, prevSec);
+          populateTouchDevices(prevTouch);
+          populateAudioCards(prevCard, prevProf);
+          updateStatusBadges();
+          updateTouchTestButton(Boolean(currentHardware.system && currentHardware.system.touch_test_active));
+          showToast("Hardware-Listen wurden aktualisiert.", "info");
+        } else {
+          showToast("Hardware konnte nicht aktualisiert werden.", "error");
+        }
+      } catch (err) {
+        showToast(`Fehler beim Aktualisieren: ${err.message}`, "error");
+      } finally {
+        setBusy(btn, false);
+      }
+    });
+
+    // Initialisieren
+    initSelectorsFromState();
+  </script>
+</body>
+</html>

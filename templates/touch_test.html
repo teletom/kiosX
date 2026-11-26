@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>kiosX Touch-Kalibrierungstest</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: #0b1120;
+      color: #f8fafc;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+
+    canvas#trail {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    .target {
+      position: fixed;
+      width: 96px;
+      height: 96px;
+      border-radius: 50%;
+      border: 4px solid #38bdf8;
+      background: rgba(56, 189, 248, 0.14);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 0.85rem;
+      text-align: center;
+      z-index: 5;
+      transition: transform 0.12s ease, background-color 0.15s ease, border-color 0.15s ease;
+    }
+
+    .target::before,
+    .target::after {
+      content: "";
+      position: absolute;
+      background: rgba(248, 250, 252, 0.7);
+      pointer-events: none;
+    }
+
+    .target::before { width: 22px; height: 2px; }
+    .target::after  { width: 2px; height: 22px; }
+
+    .target.hit {
+      border-color: #22c55e;
+      background: rgba(34, 197, 94, 0.3);
+      transform: scale(1.06);
+    }
+
+    .target span {
+      position: relative;
+      z-index: 2;
+      margin-top: 44px;
+      background: rgba(11, 17, 32, 0.85);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.72rem;
+    }
+
+    #t-tl { top: 20px;    left: 20px; }
+    #t-tr { top: 20px;    right: 20px; }
+    #t-bl { bottom: 20px; left: 20px; }
+    #t-br { bottom: 20px; right: 20px; }
+
+    .hud {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 10;
+      width: min(460px, 86vw);
+      background: rgba(15, 23, 42, 0.92);
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      border-radius: 1rem;
+      padding: 1.5rem;
+      text-align: center;
+      box-shadow: 0 20px 45px rgba(0, 0, 0, 0.55);
+    }
+
+    .hud h1 {
+      margin: 0 0 0.35rem;
+      font-size: 1.35rem;
+    }
+
+    .hud p {
+      margin: 0 0 1rem;
+      font-size: 0.92rem;
+      color: #cbd5e1;
+    }
+
+    .coords {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 1.15rem;
+      background: #020617;
+      border: 1px solid #334155;
+      border-radius: 0.6rem;
+      padding: 0.8rem;
+      margin-bottom: 1rem;
+    }
+
+    .coords small {
+      display: block;
+      margin-top: 0.3rem;
+      font-size: 0.8rem;
+      color: #94a3b8;
+    }
+
+    .actions {
+      display: flex;
+      justify-content: center;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+
+    button {
+      border: none;
+      border-radius: 0.55rem;
+      padding: 0.75rem 1.25rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    #btn-reset {
+      background: #334155;
+      color: #f8fafc;
+    }
+
+    #btn-close {
+      background: #dc2626;
+      color: #ffffff;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="trail"></canvas>
+
+  <div class="target" id="t-tl" data-corner="Oben Links"><span>Oben Links</span></div>
+  <div class="target" id="t-tr" data-corner="Oben Rechts"><span>Oben Rechts</span></div>
+  <div class="target" id="t-bl" data-corner="Unten Links"><span>Unten Links</span></div>
+  <div class="target" id="t-br" data-corner="Unten Rechts"><span>Unten Rechts</span></div>
+
+  <div class="hud">
+    <h1>kiosX Touch-Ecken-Test</h1>
+    <p>Ber&uuml;hre alle vier Zielpunkte in den Ecken, um die Touch-Ausrichtung zu pr&uuml;fen.</p>
+    <div class="coords">
+      <div id="coord-xy">Warte auf Ber&uuml;hrung&hellip;</div>
+      <small id="coord-meta">Bildschirm: &ndash; &middot; Treffer: 0 / 4</small>
+    </div>
+    <div class="actions">
+      <button type="button" id="btn-reset">Zur&uuml;cksetzen</button>
+      <button type="button" id="btn-close">Test beenden</button>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("trail");
+    const ctx = canvas.getContext("2d");
+    const targets = Array.from(document.querySelectorAll(".target"));
+    const hitSet = new Set();
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      updateMeta();
+    }
+
+    function updateMeta() {
+      document.getElementById("coord-meta").textContent =
+        `Bildschirm: ${window.innerWidth}×${window.innerHeight} · Treffer: ${hitSet.size} / 4`;
+    }
+
+    function drawPoint(x, y) {
+      ctx.fillStyle = "rgba(11, 17, 32, 0.14)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Fadenkreuz
+      ctx.strokeStyle = "rgba(56, 189, 248, 0.55)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, canvas.height);
+      ctx.moveTo(0, y);
+      ctx.lineTo(canvas.width, y);
+      ctx.stroke();
+
+      // Beruehrungspunkt
+      ctx.beginPath();
+      ctx.arc(x, y, 16, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(250, 204, 21, 0.85)";
+      ctx.fill();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "#ffffff";
+      ctx.stroke();
+    }
+
+    function handlePoint(x, y, type) {
+      const rx = Math.round(x);
+      const ry = Math.round(y);
+      const px = ((x / window.innerWidth) * 100).toFixed(1);
+      const py = ((y / window.innerHeight) * 100).toFixed(1);
+
+      document.getElementById("coord-xy").textContent = `X: ${rx} px (${px}%)  |  Y: ${ry} px (${py}%)`;
+      drawPoint(x, y);
+
+      targets.forEach((el) => {
+        const rect = el.getBoundingClientRect();
+        if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+          el.classList.add("hit");
+          hitSet.add(el.id);
+        }
+      });
+      updateMeta();
+    }
+
+    window.addEventListener("pointerdown", (e) => {
+      if (e.target.closest("button")) return;
+      handlePoint(e.clientX, e.clientY, "down");
+    });
+
+    window.addEventListener("pointermove", (e) => {
+      if (e.buttons === 0 && e.pointerType === "mouse") return;
+      if (e.target.closest("button")) return;
+      handlePoint(e.clientX, e.clientY, "move");
+    });
+
+    document.getElementById("btn-reset").addEventListener("click", () => {
+      hitSet.clear();
+      targets.forEach((el) => el.classList.remove("hit"));
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      document.getElementById("coord-xy").textContent = "Warte auf Berührung…";
+      updateMeta();
+    });
+
+    document.getElementById("btn-close").addEventListener("click", async () => {
+      try {
+        await fetch("/touch-test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "stop" }),
+        });
+      } catch (_) {}
+      window.close();
+    });
+
+    window.addEventListener("resize", resize);
+    resize();
+  </script>
+</body>
+</html>
