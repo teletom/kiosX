@@ -16,14 +16,15 @@ Schlankes, produktionsreifes Kiosk-Setup- und Konfigurations-Tool fuer Mini-PCs 
 
 ```text
 /opt/kiosX/
+├── VERSION                    # Semantische Versionsnummer (z. B. 1.1.0)
 ├── install.sh                 # Idempotentes Installations-Skript fuer Ubuntu Server
 ├── kiosx                      # CLI-Tool (verlinkt als /usr/local/bin/kiosx, SSH-faehig)
 ├── kiosk-watchdog.sh          # Chromium-Watchdog-Schleife (unterstuetzt kiosx stop/start)
 ├── kiosk-apply.sh             # Live-Applier fuer xrandr, feh, xinput & pactl
-├── app.py                     # Flask-Backend, Hardware-Erkennung, /splash, /qr.svg & /api/info
+├── app.py                     # Flask-Backend, Hardware-Erkennung, /splash, /qr.svg & Updates
 ├── wifi.conf                  # Standard-WLAN-Netzwerke (SSID=PASSWORT) fuer Netplan
 ├── templates/
-│   ├── index.html             # Web-UI (Pico CSS v2)
+│   ├── index.html             # Web-UI (Pico CSS v2) inkl. Versions- & Update-Bereich
 │   ├── splash.html            # 15s Start-Anzeige mit Kiosk-ID, IP, mDNS & QR-Code
 │   └── touch_test.html        # Vollbild-Touch-Ecken-Test mit Koordinatenanzeige
 ├── .gitignore
@@ -79,10 +80,18 @@ Ueber das Web-UI koennen live konfiguriert werden:
 3. **Touch-Kalibrierung:** Bindung an den Primaermonitor (`xinput map-to-output`, folgt im Modus **Automatisch** direkt der Display-Drehung), optionale Korrektur (`+90°/+180°/+270°`) fuer physisch verdrehte Panels sowie Vollbild-**Touch-Ecken-Test**.
 4. **Audio-Ausgabe:** Soundkarte und Ausgabe-Profil (HDMI vs. analoger Line-Out/Klinke) umschalten, Lautstaerke regeln und Stereo-Testton abspielen.
 
-## API fuer zentrale Web-App / Discovery
+## API fuer zentrale Web-App / Discovery & Updates
 
-- `GET /api/info` liefert `{ device_id, hostname, lan_ip, tailscale_ip, mdns_alias, config_url, tailscale_url, target_url, splash_seconds }` als JSON.
+- `GET /api/info` liefert `{ version, commit, device_id, hostname, lan_ip, tailscale_ip, mdns_alias, config_url, tailscale_url, target_url, splash_seconds }` als JSON.
 - `GET /qr.svg` erzeugt lokal einen SVG-QR-Code zur aktuellen Config-UI.
+- `GET /api/update/check` & `POST /api/update/apply`: Pruefen und installieren Updates direkt ueber die Weboberflaeche (mit minimaler sudoers-Regel `/etc/sudoers.d/kiosx-updater` fuer `systemctl restart kiosk-ui.service` bzw. `install.sh --skip-netplan`).
+
+> **Hinweis fuer automatische Web-UI-Updates bei privatem GitHub-Repo:**
+> Damit `git fetch`/`git pull` ohne interaktive Passwortabfrage funktioniert, einmalig auf dem Kiosk-Rechner entweder einen Read-Only **GitHub Deploy Key** (SSH) oder gespeicherte HTTPS-Credentials einrichten:
+> ```bash
+> git -C /opt/kiosX config credential.helper store
+> git -C /opt/kiosX fetch origin   # einmalig Username + Read-Only PAT eingeben
+> ```
 
 ## Steuerung per CLI (auch ueber SSH)
 

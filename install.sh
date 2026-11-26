@@ -236,13 +236,30 @@ for sock in pipewire.socket pipewire-pulse.socket; do
 done
 chown -R "${KIOSK_USER}:${KIOSK_USER}" "${KIOSK_HOME}/.config"
 
-# 5. Skript-Berechtigungen & globalen CLI-Befehl 'kiosx' einrichten
+# 5. Skript-Berechtigungen, CLI 'kiosx' & minimale sudoers fuer Web-UI-Updates einrichten
 chmod 0755 "${REPO_DIR}/install.sh" "${REPO_DIR}/kiosk-apply.sh" "${REPO_DIR}/kiosk-watchdog.sh" "${REPO_DIR}/kiosx"
 if [[ -f "${REPO_DIR}/app.py" ]]; then
     chmod 0644 "${REPO_DIR}/app.py"
 fi
 ln -sfn "${REPO_DIR}/kiosx" /usr/local/bin/kiosx
 ok "CLI-Befehl 'kiosx' unter /usr/local/bin/kiosx verknuepft."
+
+# Minimal-Rechte fuer Web-UI-Updates (nur genau 2 definierte Befehle, kein generelles sudo)
+if [[ -d /etc/sudoers.d ]]; then
+    SUDOERS_TMP="$(mktemp)"
+    cat > "${SUDOERS_TMP}" <<EOF
+# kiosX Web-UI Update-Berechtigungen (automatisch erstellt von install.sh)
+${KIOSK_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart ${SERVICE_NAME}, /usr/bin/bash ${REPO_DIR}/install.sh --skip-netplan
+EOF
+    chmod 0440 "${SUDOERS_TMP}"
+    if ! command -v visudo &>/dev/null || visudo -cf "${SUDOERS_TMP}" >/dev/null 2>&1; then
+        install -m 0440 -o root -g root "${SUDOERS_TMP}" /etc/sudoers.d/kiosx-updater
+        ok "Update-Berechtigungen unter /etc/sudoers.d/kiosx-updater eingerichtet."
+    else
+        warn "visudo-Pruefung fehlgeschlagen – /etc/sudoers.d/kiosx-updater wurde nicht geschrieben."
+    fi
+    rm -f "${SUDOERS_TMP}"
+fi
 
 # 6. Persistente Konfiguration (/etc/kiosk/config.json) & 4-stellige Kiosk-ID
 log "Richte Konfigurationsverzeichnis ${CONFIG_DIR} ein..."

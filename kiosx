@@ -279,11 +279,13 @@ cmd_apply() {
 }
 
 cmd_status() {
-    local host_name dev_id url splash_sec
+    local host_name dev_id url splash_sec version commit
     host_name="$(hostname)"
     dev_id="$(jq -r '.device_id // "-"' "${CONFIG_FILE}" 2>/dev/null || echo "-")"
     url="$(jq -r '.url // "-"' "${CONFIG_FILE}" 2>/dev/null || echo "-")"
     splash_sec="$(jq -r '.splash_seconds // 15' "${CONFIG_FILE}" 2>/dev/null || echo "15")"
+    version="$(cat "${REPO_DIR}/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "dev")"
+    commit="$(git -C "${REPO_DIR}" rev-parse --short HEAD 2>/dev/null || echo "")"
     local dev_id_lower
     dev_id_lower="$(printf '%s' "${dev_id}" | tr '[:upper:]' '[:lower:]')"
 
@@ -339,6 +341,7 @@ cmd_status() {
     [[ -n "${lan_ip}" ]] && lan_ui="http://${lan_ip}:${KIOSK_PORT}"
 
     printf '\n%s=== kiosX Status ===%s\n' "${C_BOLD}" "${C_RESET}"
+    printf '  %-16s v%s%s\n' "Version:" "${version}" "${commit:+ (${commit})}"
     printf '  %-16s %s%s%s\n' "Kiosk-ID:" "${C_BOLD}" "${dev_id}" "${C_RESET}"
     printf '  %-16s %s (User: %s)\n' "Hostname:" "${host_name}" "${KIOSK_USER}"
     printf '  %-16s %s\n' "LAN Web-UI:" "${lan_ui}"
@@ -456,6 +459,14 @@ cmd_update() {
     fi
 }
 
+cmd_version() {
+    local version commit branch
+    version="$(cat "${REPO_DIR}/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "dev")"
+    commit="$(git -C "${REPO_DIR}" rev-parse --short HEAD 2>/dev/null || echo "")"
+    branch="$(git -C "${REPO_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+    printf 'kiosX v%s%s%s\n' "${version}" "${commit:+ (${commit})}" "${branch:+ [${branch}]}"
+}
+
 usage() {
     cat <<EOF
 ${C_BOLD}kiosx${C_RESET} - Steuerung fuer den kiosX Kiosk-Modus (SSH-kompatibel)
@@ -464,13 +475,14 @@ ${C_BOLD}Verwendung:${C_RESET}
   kiosx <befehl> [argumente]
 
 ${C_BOLD}Befehle:${C_RESET}
-  status                  Zeigt Kiosk-ID, IPs, Display, Browser, Audio & Dienste
+  status                  Zeigt Version, Kiosk-ID, IPs, Display, Browser, Audio & Dienste
   start                   Startet den Chromium Kiosk-Browser (und Web-UI bei Bedarf)
   stop                    Stoppt den Browser sauber (Hintergrundbild bleibt sichtbar)
   restart                 Startet den Chromium Kiosk-Browser neu (inkl. Start-Anzeige)
   apply                   Wendet /etc/kiosk/config.json sofort live an (xrandr/xinput/pactl)
   url [neue-url]          Zeigt aktuelle Kiosk-URL oder setzt eine neue inkl. Neustart
   id                      Zeigt 4-stellige Kiosk-ID und Verbindungs-URLs
+  version                 Zeigt installierte kiosX-Version und Git-Commit
   ui <start|stop|restart|status>
                           Steuert den Web-UI systemd-Dienst (${SERVICE_NAME})
   logs [ui|browser|apply] Zeigt Logs von Web-UI, Chromium oder kiosk-apply.sh
@@ -490,6 +502,7 @@ case "${COMMAND}" in
     apply)               cmd_apply ;;
     url)                 cmd_url "${1:-}" ;;
     id)                  cmd_id ;;
+    version|-v|--version) cmd_version ;;
     ui)                  cmd_ui "${1:-status}" ;;
     logs|log)            cmd_logs "${1:-ui}" ;;
     update)              cmd_update "$@" ;;

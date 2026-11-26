@@ -290,6 +290,9 @@
       <div class="brand">
         <h1>kiosX</h1>
         <span class="id-pill" id="header-device-id" title="Kiosk-ID">{{ config.device_id }}</span>
+        <span class="badge" id="header-version" title="Installierte kiosX-Version (Commit {{ hardware.system.commit }})">
+          v{{ hardware.system.version }}
+        </span>
         <small>{{ hardware.system.hostname }} &middot; {{ hardware.system.ip }}:{{ hardware.system.port }}</small>
       </div>
       <div class="status-bar">
@@ -561,6 +564,37 @@
         </button>
       </div>
     </form>
+
+    <!-- 5. System & Updates -->
+    <article class="card" style="margin-top: 1.5rem;">
+      <header>
+        <h2>5. System &amp; Updates</h2>
+        <small id="update-header-ver">{{ hardware.system.version_display }} &middot; Branch <code>{{ hardware.system.branch }}</code></small>
+      </header>
+
+      <div id="update-status-box" class="net-strip" style="flex-direction: column; gap: 0.4rem;">
+        <div>
+          <strong>Installierte Version:</strong>
+          <code>{{ hardware.system.version_display }}</code>
+          {% if hardware.system.commit_date %}
+          <small style="opacity: 0.75;">({{ hardware.system.commit_date }})</small>
+          {% endif %}
+        </div>
+        <div id="update-status-text" style="opacity: 0.85;">
+          Klicke auf &bdquo;Nach Updates suchen&ldquo;, um den Stand auf GitHub zu pr&uuml;fen.
+        </div>
+        <ul id="update-changelog" hidden style="margin: 0.35rem 0 0 1.2rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem;"></ul>
+      </div>
+
+      <div class="row-actions">
+        <button type="button" id="btn-check-update" class="secondary outline">
+          Nach Updates suchen
+        </button>
+        <button type="button" id="btn-apply-update" class="outline" disabled>
+          Update installieren
+        </button>
+      </div>
+    </article>
   </main>
 
   <script>
@@ -1031,6 +1065,101 @@
       } catch (err) {
         showToast(`Fehler beim Aktualisieren: ${err.message}`, "error");
       } finally {
+        setBusy(btn, false);
+      }
+    });
+
+    // Update-Pruefung & Installation
+    async function waitForServerBackOnline(prevCommit, maxTries = 35) {
+      for (let i = 0; i < maxTries; i++) {
+        await new Promise((r) => setTimeout(r, 1500));
+        try {
+          const res = await fetch("/api/info", { cache: "no-store" });
+          if (res.ok) {
+            const info = await res.json();
+            if (info && info.ok) {
+              showToast(`kiosX wurde auf ${info.version_display || ("v" + info.version)} aktualisiert!`, "success");
+              setTimeout(() => window.location.reload(), 900);
+              return;
+            }
+          }
+        } catch (_) {}
+      }
+      showToast("Neustart dauert laenger als erwartet – Seite bitte manuell neu laden.", "warning");
+    }
+
+    $("btn-check-update").addEventListener("click", async () => {
+      const btn = $("btn-check-update");
+      const applyBtn = $("btn-apply-update");
+      const statusEl = $("update-status-text");
+      const listEl = $("update-changelog");
+      setBusy(btn, true, "Pruefe GitHub...");
+      try {
+        const res = await fetch("/api/update/check", { cache: "no-store" });
+        const data = await res.json();
+        listEl.innerHTML = "";
+        listEl.hidden = true;
+
+        if (!res.ok || !data.ok) {
+          statusEl.textContent = data.message || "Update-Pruefung fehlgeschlagen.";
+          applyBtn.disabled = true;
+          showToast(data.message || "Update-Pruefung fehlgeschlagen.", "error");
+          return;
+        }
+
+        statusEl.textContent = data.message;
+        if (data.update_available) {
+          applyBtn.disabled = false;
+          applyBtn.classList.remove("outline");
+          $("header-version").innerHTML = `<span class="dot warn"></span>v${data.current_version} &rarr; v${data.remote_version}`;
+          if (Array.isArray(data.changelog) && data.changelog.length) {
+            data.changelog.forEach((entry) => {
+              const li = document.createElement("li");
+              li.textContent = entry;
+              listEl.appendChild(li);
+            });
+            listEl.hidden = false;
+          }
+          showToast(data.message, "info");
+        } else {
+          applyBtn.disabled = true;
+          applyBtn.classList.add("outline");
+          showToast(data.message, "success");
+        }
+      } catch (err) {
+        statusEl.textContent = `Netzwerkfehler bei Update-Pruefung: ${err.message}`;
+        showToast(`Netzwerkfehler: ${err.message}`, "error");
+      } finally {
+        setBusy(btn, false);
+      }
+    });
+
+    $("btn-apply-update").addEventListener("click", async () => {
+      const btn = $("btn-apply-update");
+      const statusEl = $("update-status-text");
+      setBusy(btn, true, "Installiere Update...");
+      try {
+        const res = await fetch("/api/update/apply", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          statusEl.textContent = data.message || "Update fehlgeschlagen.";
+          showToast(data.message || "Update fehlgeschlagen.", "error");
+          setBusy(btn, false);
+          return;
+        }
+        statusEl.textContent = data.message;
+        showToast(data.message, "info");
+        if (data.restarting) {
+          await waitForServerBackOnline(data.new_commit || "");
+        } else {
+          setBusy(btn, false);
+        }
+      } catch (err) {
+        showToast(`Fehler beim Update: ${err.message}`, "error");
         setBusy(btn, false);
       }
     });

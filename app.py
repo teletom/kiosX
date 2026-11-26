@@ -31,11 +31,16 @@ from flask import Flask, Response, jsonify, render_template, request, send_file
 
 app = Flask(__name__)
 
+REPO_DIR = Path(__file__).resolve().parent
+VERSION_FILE = REPO_DIR / "VERSION"
 CONFIG_PATH = Path(os.environ.get("KIOSX_CONFIG", "/etc/kiosk/config.json"))
 WALLPAPER_PATH = Path(os.environ.get("KIOSX_WALLPAPER", "/etc/kiosk/wallpaper.jpg"))
 APPLY_SCRIPT = Path(os.environ.get("KIOSX_APPLY_SCRIPT", "/opt/kiosX/kiosk-apply.sh"))
 LISTEN_HOST = os.environ.get("KIOSX_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("KIOSX_PORT", "8080"))
+SERVICE_NAME = "kiosk-ui.service"
+
+_UPDATE_LOCK = threading.Lock()
 
 DEFAULT_WALLPAPER_URL = (
     "https://images.unsplash.com/photo-1493606278519-11aa9f86e40a"
@@ -882,6 +887,58 @@ def is_browser_running() -> bool:
         return False
 
 
+def run_git(args: list[str], timeout: int = 15) -> subprocess.CompletedProcess[str]:
+    """Fuehrt einen Git-Befehl im Repository nicht-interaktiv aus."""
+    env = build_runtime_env()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return subprocess.run(
+        ["git", "-C", str(REPO_DIR), *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+        check=False,
+    )
+
+
+def get_version_info() -> dict[str, str]:
+    """Liest Versionsnummer aus VERSION sowie lokalen Git-Commit und Branch."""
+    version = "0.0.0"
+    try:
+        if VERSION_FILE.is_file():
+            raw = VERSION_FILE.read_text(encoding="utf-8").strip()
+            if raw:
+                version = raw
+    except OSError:
+        pass
+
+    commit = ""
+    branch = ""
+    commit_date = ""
+    if shutil.which("git") and (REPO_DIR / ".git").exists():
+        try:
+            r1 = run_git(["rev-parse", "--short", "HEAD"], timeout=4)
+            if r1.returncode == 0:
+                commit = r1.stdout.strip()
+            r2 = run_git(["rev-parse", "--abbrev-ref", "HEAD"], timeout=4)
+            if r2.returncode == 0:
+                branch = r2.stdout.strip()
+            r3 = run_git(["log", "-1", "--format=%cs"], timeout=4)
+            if r3.returncode == 0:
+                commit_date = r3.stdout.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    display = f"v{version}" + (f" ({commit})" if commit else "")
+    return {
+        "version": version,
+        "commit": commit,
+        "branch": branch or "main",
+        "commit_date": commit_date,
+        "display": display,
+    }
+
+
 def build_device_info(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = cfg or load_config()
     hostname = socket.gethostname()
@@ -897,8 +954,14 @@ def build_device_info(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     tailscale_url = f"http://{tailscale_ip}:{LISTEN_PORT}" if tailscale_ip else ""
     mdns_url = f"http://{mdns_alias}:{LISTEN_PORT}"
     primary_config_url = lan_url or tailscale_url or mdns_url
+    ver = get_version_info()
 
     return {
+        "version": ver["version"],
+        "commit": ver["commit"],
+        "branch": ver["branch"],
+        "commit_date": ver["commit_date"],
+        "version_display": ver["display"],
         "device_id": device_id,
         "hostname": hostname,
         "lan_ip": lan_ip,
@@ -1304,6 +1367,177 @@ def restart_browser():
             "message": "Kein laufender Chromium-Prozess gefunden (Watchdog startet automatisch in X11).",
         }
     )
+
+
+def _resolve_git_upstream(branch: str) -> str:
+    res = run_git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], timeout=4)
+    if res.returncode == 0 and res.stdout.strip():
+        return res.stdout.strip()
+    return f"origin/{branch or 'main'}"
+
+
+@app.route("/api/update/check", methods=["GET"])
+def api_update_check():
+    """Prueft ueber git fetch, ob neue Commits/Versionen auf dem Remote verfuegbar sind."""
+    ver = get_version_info()
+    if not shutil.which("git") or not (REPO_DIR / ".git").exists():
+        return jsonify({"ok": False, "message": "Kein Git-Repository unter /opt/kiosX gefunden.", **ver}), 400
+
+    try:
+        fetch_res = run_git(["fetch", "--quiet", "origin"], timeout=20)
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "message": "Zeitueberschreitung bei git fetch (Netzwerk pruefen).", **ver}), 504
+    except OSError as exc:
+        return jsonify({"ok": False, "message": f"Git-Fehler: {exc}", **ver}), 500
+
+    if fetch_res.returncode != 0:
+        err_out = (fetch_res.stderr or fetch_res.stdout).strip()
+        auth_err = any(
+            marker in err_out.lower()
+            for marker in ("could not read username", "authentication failed", "permission denied", "terminal prompts disabled")
+        )
+        msg = (
+            "Git-Authentifizierung fehlt fuer automatische Updates (SSH-Deploy-Key oder 'git config credential.helper store' einrichten)."
+            if auth_err
+            else f"Update-Pruefung fehlgeschlagen: {err_out}"
+        )
+        return jsonify({"ok": False, "auth_required": auth_err, "message": msg, **ver}), 502
+
+    upstream = _resolve_git_upstream(ver["branch"])
+    behind_res = run_git(["rev-list", "--count", f"HEAD..{upstream}"], timeout=5)
+    ahead_res = run_git(["rev-list", "--count", f"{upstream}..HEAD"], timeout=5)
+    remote_sha_res = run_git(["rev-parse", "--short", upstream], timeout=5)
+    remote_ver_res = run_git(["show", f"{upstream}:VERSION"], timeout=5)
+    log_res = run_git(["log", "--oneline", "-n", "10", f"HEAD..{upstream}"], timeout=5)
+    dirty_res = run_git(["status", "--porcelain", "--untracked-files=no"], timeout=5)
+
+    commits_behind = int(behind_res.stdout.strip()) if behind_res.returncode == 0 and behind_res.stdout.strip().isdigit() else 0
+    commits_ahead = int(ahead_res.stdout.strip()) if ahead_res.returncode == 0 and ahead_res.stdout.strip().isdigit() else 0
+    remote_commit = remote_sha_res.stdout.strip() if remote_sha_res.returncode == 0 else ""
+    remote_version = remote_ver_res.stdout.strip() if remote_ver_res.returncode == 0 else ver["version"]
+    changelog = [line.strip() for line in log_res.stdout.splitlines() if line.strip()] if log_res.returncode == 0 else []
+    dirty = bool(dirty_res.stdout.strip()) if dirty_res.returncode == 0 else False
+
+    update_available = commits_behind > 0
+    msg = (
+        f"Update verfuegbar: v{remote_version} ({remote_commit}) – {commits_behind} neuer Commit(s)."
+        if update_available
+        else f"kiosX ist aktuell ({ver['display']})."
+    )
+    return jsonify(
+        {
+            "ok": True,
+            "current_version": ver["version"],
+            "current_commit": ver["commit"],
+            "branch": ver["branch"],
+            "remote_version": remote_version,
+            "remote_commit": remote_commit,
+            "update_available": update_available,
+            "commits_behind": commits_behind,
+            "commits_ahead": commits_ahead,
+            "changelog": changelog,
+            "dirty": dirty,
+            "message": msg,
+        }
+    )
+
+
+@app.route("/api/update/apply", methods=["POST"])
+def api_update_apply():
+    """Fuehrt git pull --ff-only aus und startet Web-UI (oder install.sh --skip-netplan) asynchron neu."""
+    if not _UPDATE_LOCK.acquire(blocking=False):
+        return jsonify({"ok": False, "message": "Ein Update laeuft bereits."}), 409
+
+    try:
+        payload = request.get_json(silent=True) or {}
+        force_install = bool(payload.get("full_install", False))
+
+        if not shutil.which("git") or not (REPO_DIR / ".git").exists():
+            return jsonify({"ok": False, "message": "Kein Git-Repository unter /opt/kiosX gefunden."}), 400
+
+        dirty_res = run_git(["status", "--porcelain", "--untracked-files=no"], timeout=5)
+        if dirty_res.returncode == 0 and dirty_res.stdout.strip():
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "message": "Lokale uncommittete Aenderungen im Repo – Update abgebrochen (bitte per SSH pruefen).",
+                    }
+                ),
+                409,
+            )
+
+        old_ver = get_version_info()
+        old_head_res = run_git(["rev-parse", "HEAD"], timeout=5)
+        old_head = old_head_res.stdout.strip() if old_head_res.returncode == 0 else ""
+
+        try:
+            pull_res = run_git(["pull", "--ff-only"], timeout=30)
+        except subprocess.TimeoutExpired:
+            return jsonify({"ok": False, "message": "Zeitueberschreitung bei git pull."}), 504
+
+        if pull_res.returncode != 0:
+            err_out = (pull_res.stderr or pull_res.stdout).strip()
+            return jsonify({"ok": False, "message": f"git pull fehlgeschlagen: {err_out}"}), 500
+
+        new_ver = get_version_info()
+        new_head_res = run_git(["rev-parse", "HEAD"], timeout=5)
+        new_head = new_head_res.stdout.strip() if new_head_res.returncode == 0 else ""
+
+        changed_files: list[str] = []
+        if old_head and new_head and old_head != new_head:
+            diff_res = run_git(["diff", "--name-only", f"{old_head}..{new_head}"], timeout=5)
+            if diff_res.returncode == 0:
+                changed_files = [f.strip() for f in diff_res.stdout.splitlines() if f.strip()]
+
+        updated = bool(old_head != new_head)
+        needs_install = force_install or ("install.sh" in changed_files)
+
+        if not updated and not force_install:
+            return jsonify(
+                {
+                    "ok": True,
+                    "updated": False,
+                    "restarting": False,
+                    "version": new_ver["version"],
+                    "commit": new_ver["commit"],
+                    "message": f"Bereits auf dem neuesten Stand ({new_ver['display']}).",
+                }
+            )
+
+        # Verzoegerten Neustart / install.sh im Hintergrund ausfuehren, damit HTTP-Antwort sauber ankommt
+        if needs_install:
+            bg_cmd = f"sleep 1; sudo -n /usr/bin/bash {REPO_DIR}/install.sh --skip-netplan >/tmp/kiosx-update.log 2>&1 || sudo -n /usr/bin/systemctl restart {SERVICE_NAME} >>/tmp/kiosx-update.log 2>&1"
+        else:
+            bg_cmd = f"sleep 1; sudo -n /usr/bin/systemctl restart {SERVICE_NAME} >/tmp/kiosx-update.log 2>&1"
+
+        restarting = True
+        try:
+            subprocess.Popen(
+                ["/bin/sh", "-c", bg_cmd],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            restarting = False
+
+        mode_txt = "Vollstaendiges Update (install.sh --skip-netplan)" if needs_install else "Web-UI Neustart"
+        return jsonify(
+            {
+                "ok": True,
+                "updated": updated,
+                "restarting": restarting,
+                "full_install": needs_install,
+                "old_version": old_ver["version"],
+                "new_version": new_ver["version"],
+                "new_commit": new_ver["commit"],
+                "changed_files": changed_files,
+                "message": f"Update auf {new_ver['display']} geladen – {mode_txt} laeuft...",
+            }
+        )
+    finally:
+        _UPDATE_LOCK.release()
 
 
 if __name__ == "__main__":
