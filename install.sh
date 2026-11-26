@@ -20,6 +20,8 @@ SERVICE_NAME="kiosk-ui.service"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}"
 KIOSK_PORT="${KIOSX_PORT:-8080}"
 KIOSK_USER="${KIOSK_USER:-}"
+GIT_TOKEN="${KIOSX_GIT_TOKEN:-}"
+GIT_USER="${KIOSX_GIT_USER:-teletom}"
 SKIP_NETPLAN=0
 
 log()  { printf '\033[1;34m[kiosX]\033[0m %s\n' "$*"; }
@@ -29,12 +31,15 @@ err()  { printf '\033[1;31m[kiosX ERROR]\033[0m %s\n' "$*" >&2; }
 
 usage() {
     cat <<EOF
-Verwendung: sudo bash $0 [--user <benutzername>] [--port <port>] [--skip-netplan]
+Verwendung: sudo bash $0 [--user <benutzername>] [--port <port>] [--git-token <pat>] [--skip-netplan]
 
 Optionen:
   --user <name>     Linux-Benutzer fuer Kiosk-Session und Web-UI
                     (Standard: \$SUDO_USER oder 'kiosk')
   --port <port>     Port der Flask-Weboberflaeche (Standard: 8080)
+  --git-token <pat> Read-Only GitHub PAT fuer automatische Web-UI-Updates
+                    (alternativ Env KIOSX_GIT_TOKEN oder direkt in Clone-URL)
+  --git-user <name> GitHub-Benutzername fuer --git-token (Standard: teletom)
   --wifi-conf <pf>  Pfad zur WLAN-Konfigurationsdatei (Standard: ${REPO_DIR}/wifi.conf)
   --skip-netplan    Bestehende Netplan-Konfiguration nicht veraendern
   -h, --help        Diese Hilfe anzeigen
@@ -49,6 +54,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --port)
             KIOSK_PORT="${2:-8080}"
+            shift 2
+            ;;
+        --git-token)
+            GIT_TOKEN="${2:-}"
+            shift 2
+            ;;
+        --git-user)
+            GIT_USER="${2:-teletom}"
             shift 2
             ;;
         --wifi-conf)
@@ -260,6 +273,112 @@ EOF
     fi
     rm -f "${SUDOERS_TMP}"
 fi
+
+# 5b. Automatische GitHub-Authentifizierung fuer Web-UI-Updates einrichten
+configure_git_updater_auth() {
+    if ! command -v git &>/dev/null || [[ ! -d "${REPO_DIR}/.git" ]]; then
+        return 0
+    fi
+
+    local cred_file="${KIOSK_HOME}/.git-credentials"
+    local origin_url
+    origin_url="$(runuser -u "${KIOSK_USER}" -- git -C "${REPO_DIR}" remote get-url origin 2>/dev/null || true)"
+    [[ -z "${origin_url}" ]] && return 0
+
+    # Repository explizit an die geschuetzte Credential-Datei des Kiosk-Benutzers binden
+    runuser -u "${KIOSK_USER}" -- git -C "${REPO_DIR}" config --local credential.helper "store --file=${cred_file}" || true
+
+    save_git_cred() {
+        local host="$1"
+        local user="$2"
+        local token="$3"
+        python3 - "${cred_file}" "${host}" "${user}" "${token}" <<'PYCRED'
+import os, sys, urllib.parse
+cred_path, host, user, token = sys.argv[1:5]
+entry = f"https://{urllib.parse.quote(user, safe='')}:{urllib.parse.quote(token, safe='')}@{host}"
+lines = []
+if os.path.isfile(cred_path):
+    with open(cred_path, "r", encoding="utf-8", errors="ignore") as fh:
+        for line in fh:
+            s = line.strip()
+            if not s or f"@{host}" in s:
+                continue
+            lines.append(s)
+lines.append(entry)
+with open(cred_path, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(lines) + "\n")
+PYCRED
+        chown "${KIOSK_USER}:${KIOSK_USER}" "${cred_file}"
+        chmod 0600 "${cred_file}"
+    }
+
+    # 1) Falls Token direkt in der Clone-URL stand (https://user:TOKEN@github.com/...),
+    #    sicher nach ~/.git-credentials (0600) verschieben und Remote-URL bereinigen
+    if [[ "${origin_url}" =~ ^https?://[^/]+@ ]]; then
+        local parsed
+        parsed="$(python3 - "${origin_url}" <<'PYPARSE'
+import sys, urllib.parse
+u = urllib.parse.urlsplit(sys.argv[1])
+host = u.hostname or "github.com"
+user = urllib.parse.unquote(u.username or "teletom")
+pwd = urllib.parse.unquote(u.password or "")
+if not pwd and u.username:
+    pwd = user
+    user = "x-access-token"
+clean = urllib.parse.urlunsplit((u.scheme, host + (f":{u.port}" if u.port else ""), u.path, u.query, u.fragment))
+print(f"{host}\t{user}\t{pwd}\t{clean}")
+PYPARSE
+)"
+        local p_host p_user p_pwd p_clean
+        IFS=$'\t' read -r p_host p_user p_pwd p_clean <<< "${parsed}"
+        if [[ -n "${p_pwd}" ]]; then
+            save_git_cred "${p_host}" "${p_user}" "${p_pwd}"
+            runuser -u "${KIOSK_USER}" -- git -C "${REPO_DIR}" remote set-url origin "${p_clean}"
+            ok "Git-Zugangsdaten aus Clone-URL sicher nach ${cred_file} (0600) uebernommen und Remote-URL bereinigt."
+            origin_url="${p_clean}"
+        fi
+    fi
+
+    # 2) Falls --git-token / KIOSX_GIT_TOKEN uebergeben wurde, direkt speichern
+    if [[ -n "${GIT_TOKEN}" ]]; then
+        local host
+        host="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.urlsplit(sys.argv[1]).hostname or "github.com")' "${origin_url}")"
+        save_git_cred "${host}" "${GIT_USER}" "${GIT_TOKEN}"
+        ok "Git-Token sicher in ${cred_file} (0600) gespeichert."
+    fi
+
+    # 3) Testen, ob nicht-interaktives git fetch bereits funktioniert
+    if runuser -u "${KIOSK_USER}" -- env GIT_TERMINAL_PROMPT=0 git -C "${REPO_DIR}" fetch --quiet origin 2>/dev/null; then
+        ok "GitHub-Update-Zugriff verifiziert (automatische Web-UI-Updates aktiv)."
+        return 0
+    fi
+
+    # 4) Bei interaktiver SSH-Installation einmalig optional nach dem Read-Only Token fragen
+    if [[ -t 0 && "${origin_url}" == https://* ]]; then
+        echo ""
+        log "Fuer automatische Updates im Web-UI benoetigt dieses private Repo ein Read-Only GitHub Token (PAT)."
+        printf 'Read-Only GitHub Token eingeben (Enter zum Ueberspringen): '
+        local input_token=""
+        read -r -s input_token || true
+        echo ""
+        if [[ -n "${input_token}" ]]; then
+            local host
+            host="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.urlsplit(sys.argv[1]).hostname or "github.com")' "${origin_url}")"
+            save_git_cred "${host}" "${GIT_USER}" "${input_token}"
+            if runuser -u "${KIOSK_USER}" -- env GIT_TERMINAL_PROMPT=0 git -C "${REPO_DIR}" fetch --quiet origin 2>/dev/null; then
+                ok "GitHub-Token verifiziert – automatische Web-UI-Updates sind ab sofort aktiv!"
+            else
+                warn "Token gespeichert, aber 'git fetch origin' war nicht erfolgreich (Token-Rechte/Netzwerk pruefen)."
+            fi
+        else
+            log "Uebersprungen – kann jederzeit per 'sudo bash ${REPO_DIR}/install.sh --skip-netplan --git-token <PAT>' nachgeholt werden."
+        fi
+    else
+        warn "Automatischer git fetch ohne Zugangsdaten nicht moeglich (fuer Web-UI-Updates: --git-token <PAT> uebergeben)."
+    fi
+}
+
+configure_git_updater_auth
 
 # 6. Persistente Konfiguration (/etc/kiosk/config.json) & 4-stellige Kiosk-ID
 log "Richte Konfigurationsverzeichnis ${CONFIG_DIR} ein..."

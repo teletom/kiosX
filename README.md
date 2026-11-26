@@ -86,12 +86,16 @@ Ueber das Web-UI koennen live konfiguriert werden:
 - `GET /qr.svg` erzeugt lokal einen SVG-QR-Code zur aktuellen Config-UI.
 - `GET /api/update/check` & `POST /api/update/apply`: Pruefen und installieren Updates direkt ueber die Weboberflaeche (mit minimaler sudoers-Regel `/etc/sudoers.d/kiosx-updater` fuer `systemctl restart kiosk-ui.service` bzw. `install.sh --skip-netplan`).
 
-> **Hinweis fuer automatische Web-UI-Updates bei privatem GitHub-Repo:**
-> Damit `git fetch`/`git pull` ohne interaktive Passwortabfrage funktioniert, einmalig auf dem Kiosk-Rechner entweder einen Read-Only **GitHub Deploy Key** (SSH) oder gespeicherte HTTPS-Credentials einrichten:
-> ```bash
-> git -C /opt/kiosX config credential.helper store
-> git -C /opt/kiosX fetch origin   # einmalig Username + Read-Only PAT eingeben
-> ```
+> **Automatische Web-UI-Updates bei privatem GitHub-Repo (ohne manuelle Git-Befehle):**
+> `install.sh` richtet `credential.helper` und `~/.git-credentials` (`0600`) automatisch ein – ueber eine der drei Moeglichkeiten:
+> 1. **Direkt beim Klonen (Zero-Touch):**
+>    ```bash
+>    git clone https://teletom:<READONLY_PAT>@github.com/teletom/kiosX.git /opt/kiosX
+>    cd /opt/kiosX && sudo bash install.sh
+>    ```
+>    *(Das Token wird automatisch aus der Remote-URL nach `~/.git-credentials` mit `0600` verschoben und aus `.git/config` entfernt.)*
+> 2. **Per Parameter:** `sudo bash install.sh --git-token <READONLY_PAT>` (oder `KIOSX_GIT_TOKEN=...`).
+> 3. **Interaktiv beim `install.sh`-Lauf:** Falls noch keine Credentials hinterlegt sind, fragt `install.sh` einmalig unsichtbar nach dem Read-Only Token (Enter zum Ueberspringen).
 
 ## Steuerung per CLI (auch ueber SSH)
 
