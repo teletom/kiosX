@@ -87,14 +87,33 @@ fi
 
 log "Installiere kiosX aus ${REPO_DIR} fuer Benutzer '${KIOSK_USER}' (UID=${KIOSK_UID}, Home=${KIOSK_HOME})"
 
-# 3. Systempakete installieren
-log "Aktualisiere Paketquellen und installiere Systempakete..."
+# 3. Systempakete installieren (vollstaendig fuer minimales Ubuntu Server)
+log "Pruefe Paketquellen (inkl. universe) und installiere Systempakete..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 
+# Sicherstellen, dass das Ubuntu 'universe'-Repository aktiviert ist
+if ! apt-cache show openbox &>/dev/null; then
+    log "Aktiviere Ubuntu 'universe'-Repository..."
+    if [[ -f /etc/apt/sources.list.d/ubuntu.sources ]]; then
+        sed -i '/^Components:/ { /universe/! s/$/ universe/ }' /etc/apt/sources.list.d/ubuntu.sources
+    elif command -v add-apt-repository &>/dev/null; then
+        add-apt-repository -y universe
+    else
+        apt-get install -y --no-install-recommends software-properties-common
+        add-apt-repository -y universe
+    fi
+    apt-get update -qq
+fi
+
 BASE_PACKAGES=(
+    ca-certificates
+    dbus-user-session
+    libpam-systemd
     xorg
     xinit
+    xauth
+    xserver-xorg-input-libinput
     openbox
     x11-xserver-utils
     xinput
@@ -102,16 +121,35 @@ BASE_PACKAGES=(
     pipewire
     wireplumber
     pipewire-pulse
+    pipewire-alsa
     pulseaudio-utils
     alsa-utils
-    dbus-user-session
+    python3
     python3-flask
     jq
     procps
     fonts-dejavu-core
 )
 
-apt-get install -y --no-install-recommends "${BASE_PACKAGES[@]}"
+# Hilfsfunktion fuer robuste apt-Installation (faengt kurzzeitige Mirror-Sync-404s ab)
+apt_install_retry() {
+    local attempt=1
+    local max_attempts=3
+    while (( attempt <= max_attempts )); do
+        if apt-get install -y -o Acquire::Retries=3 "$@"; then
+            return 0
+        fi
+        if (( attempt < max_attempts )); then
+            warn "apt-get install fehlgeschlagen (Versuch ${attempt}/${max_attempts}) – aktualisiere Paketlisten und wiederhole..."
+            sleep 3
+            apt-get update -qq || true
+        fi
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+apt_install_retry --no-install-recommends "${BASE_PACKAGES[@]}"
 
 # Chromium installieren (Ubuntu verwendet haeufig chromium-browser/Snap, Debian natives chromium)
 install_chromium() {
@@ -124,17 +162,21 @@ install_chromium() {
     cand="$(apt-cache policy chromium 2>/dev/null | awk '/Candidate:/ {print $2}')"
     if [[ -n "${cand}" && "${cand}" != "(none)" ]]; then
         log "Installiere natives apt-Paket 'chromium'..."
-        apt-get install -y chromium
+        apt_install_retry chromium
         return 0
     fi
 
-    log "Kein natives apt-Paket 'chromium' verfuegbar; installiere ueber 'chromium-browser' / Snap..."
+    log "Kein natives apt-Paket 'chromium' verfuegbar; installiere ueber Snap / 'chromium-browser'..."
     if ! command -v snap &>/dev/null; then
-        apt-get install -y snapd
-        systemctl enable --now snapd.socket || true
+        log "Installiere snapd..."
+        apt_install_retry snapd
     fi
+    systemctl enable --now snapd.socket snapd.service || true
+    log "Warte auf Initialisierung von snapd..."
+    snap wait system seed.loaded || sleep 5
+
     if apt-cache show chromium-browser &>/dev/null; then
-        apt-get install -y chromium-browser
+        apt_install_retry chromium-browser
     else
         snap install chromium
     fi
@@ -155,12 +197,17 @@ if command -v loginctl &>/dev/null; then
     loginctl enable-linger "${KIOSK_USER}" || warn "loginctl enable-linger fehlgeschlagen (ignoriert)."
 fi
 
-# PipeWire User-Services fuer den Kiosk-Benutzer aktivieren
-USER_SYSTEMD_WANTS="${KIOSK_HOME}/.config/systemd/user/default.target.wants"
-mkdir -p "${USER_SYSTEMD_WANTS}"
+# PipeWire User-Services & Sockets fuer den Kiosk-Benutzer aktivieren
+USER_SYSTEMD_DIR="${KIOSK_HOME}/.config/systemd/user"
+mkdir -p "${USER_SYSTEMD_DIR}/default.target.wants" "${USER_SYSTEMD_DIR}/sockets.target.wants"
 for unit in pipewire.service pipewire-pulse.service wireplumber.service; do
     if [[ -f "/usr/lib/systemd/user/${unit}" ]]; then
-        ln -sfn "/usr/lib/systemd/user/${unit}" "${USER_SYSTEMD_WANTS}/${unit}"
+        ln -sfn "/usr/lib/systemd/user/${unit}" "${USER_SYSTEMD_DIR}/default.target.wants/${unit}"
+    fi
+done
+for sock in pipewire.socket pipewire-pulse.socket; do
+    if [[ -f "/usr/lib/systemd/user/${sock}" ]]; then
+        ln -sfn "/usr/lib/systemd/user/${sock}" "${USER_SYSTEMD_DIR}/sockets.target.wants/${sock}"
     fi
 done
 chown -R "${KIOSK_USER}:${KIOSK_USER}" "${KIOSK_HOME}/.config"
