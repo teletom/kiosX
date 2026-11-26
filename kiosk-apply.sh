@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# kiosX - Live-Konfigurations-Applier (Display, Touch, Audio)
+# kiosX - Live-Konfigurations-Applier (Display, Wallpaper, Touch, Audio)
 # =============================================================================
 # Liest /etc/kiosk/config.json per jq aus und wendet alle Einstellungen ohne
 # Neustart auf die laufende X11- und PipeWire-Session an.
@@ -9,6 +9,7 @@
 set -u
 
 CONFIG_FILE="${KIOSX_CONFIG:-/etc/kiosk/config.json}"
+WALLPAPER_FILE="${KIOSX_WALLPAPER:-/etc/kiosk/wallpaper.jpg}"
 export LC_ALL=C
 export DISPLAY="${DISPLAY:-:0}"
 export XAUTHORITY="${XAUTHORITY:-${HOME}/.Xauthority}"
@@ -46,7 +47,7 @@ SECONDARY_OUTPUT="$(jq -r '.display.secondary_output // ""' "${CONFIG_FILE}")"
 SECONDARY_MODE="$(jq -r '.display.secondary_mode // "off"' "${CONFIG_FILE}")"
 
 TOUCH_DEVICE="$(jq -r '.touch.device // ""' "${CONFIG_FILE}")"
-TOUCH_ROTATION="$(jq -r '.touch.rotation // "0"' "${CONFIG_FILE}")"
+TOUCH_ROTATION="$(jq -r '.touch.rotation // "auto"' "${CONFIG_FILE}")"
 
 AUDIO_CARD="$(jq -r '.audio.card // ""' "${CONFIG_FILE}")"
 AUDIO_PROFILE="$(jq -r '.audio.profile // ""' "${CONFIG_FILE}")"
@@ -70,10 +71,10 @@ case "${SECONDARY_MODE}" in
 esac
 
 case "${TOUCH_ROTATION}" in
-    0|90|180|270) ;;
+    auto|0|90|180|270) ;;
     *)
-        warn "Ungueltige Touch-Ausrichtung '${TOUCH_ROTATION}', verwende '0'."
-        TOUCH_ROTATION="0"
+        warn "Ungueltige Touch-Korrektur '${TOUCH_ROTATION}', verwende 'auto'."
+        TOUCH_ROTATION="auto"
         ;;
 esac
 
@@ -174,7 +175,6 @@ if (( X11_AVAILABLE == 1 )); then
                 warn "Konfiguriertes Zweit-Display '${SECONDARY_OUTPUT}' nicht verbunden."
             fi
         elif [[ "${SECONDARY_MODE}" == "off" ]]; then
-            # Alle uebrigen verbundenen Ausgaenge deaktivieren, wenn kein Zweitdisplay aktiv
             for out in "${CONNECTED_OUTPUTS[@]}"; do
                 if [[ "${out}" != "${ACTIVE_PRIMARY}" ]]; then
                     XRANDR_ARGS+=(--output "${out}" --off)
@@ -187,16 +187,21 @@ if (( X11_AVAILABLE == 1 )); then
             warn "xrandr meldete einen Fehler beim Anwenden der Display-Konfiguration."
         fi
     fi
+
+    # Hintergrundbild passend zur aktuellen Aufloesung/Drehung setzen
+    if [[ -s "${WALLPAPER_FILE}" ]] && command -v feh >/dev/null 2>&1; then
+        log "Setze Hintergrundbild: ${WALLPAPER_FILE}"
+        feh --no-fehbg --bg-fill "${WALLPAPER_FILE}" >/dev/null 2>&1 || warn "feh konnte Hintergrundbild nicht setzen."
+    fi
 fi
 
 # -----------------------------------------------------------------------------
-# 3. Touch-Kalibrierung (xinput map-to-output + Coordinate Transformation Matrix)
+# 3. Touch-Kalibrierung (Option A: auto via xinput map-to-output + optionaler Offset)
 # -----------------------------------------------------------------------------
 if (( X11_AVAILABLE == 1 )) && [[ -n "${TOUCH_DEVICE}" ]]; then
     if ! command -v xinput >/dev/null 2>&1; then
         warn "'xinput' nicht verfuegbar – Touch-Kalibrierung uebersprungen."
     else
-        # Geraete-ID(s) aufloesen: numerische ID direkt oder exakter Name unter Pointer-Geraeten
         TOUCH_IDS=()
         if [[ "${TOUCH_DEVICE}" =~ ^[0-9]+$ ]]; then
             if xinput list --id-only "${TOUCH_DEVICE}" >/dev/null 2>&1; then
@@ -219,7 +224,6 @@ if (( X11_AVAILABLE == 1 )) && [[ -n "${TOUCH_DEVICE}" ]]; then
                     }
                 '
             )
-            # Fallback ueber xinput --id-only (falls Name eindeutig ist)
             if (( ${#TOUCH_IDS[@]} == 0 )); then
                 if fallback_id="$(xinput list --id-only "pointer:${TOUCH_DEVICE}" 2>/dev/null)"; then
                     [[ -n "${fallback_id}" ]] && TOUCH_IDS=("${fallback_id}")
@@ -230,17 +234,9 @@ if (( X11_AVAILABLE == 1 )) && [[ -n "${TOUCH_DEVICE}" ]]; then
         if (( ${#TOUCH_IDS[@]} == 0 )); then
             warn "Touch-Geraet '${TOUCH_DEVICE}' nicht gefunden – uebersprungen."
         else
-            # 3x3 Rotationsmatrix fuer X11 Coordinate Transformation Matrix
-            # (0=normal, 90=xrandr right, 180=inverted, 270=xrandr left)
-            case "${TOUCH_ROTATION}" in
-                0)   ROT_MAT="1 0 0 0 1 0 0 0 1" ;;
-                90)  ROT_MAT="0 1 0 -1 0 1 0 0 1" ;;
-                180) ROT_MAT="-1 0 1 0 -1 1 0 0 1" ;;
-                270) ROT_MAT="0 -1 1 1 0 0 0 0 1" ;;
-            esac
-
             for dev_id in "${TOUCH_IDS[@]}"; do
                 # 1) Touch-Geraet an Primaer-Monitor binden
+                #    Hinweis: xinput map-to-output uebernimmt die aktuelle xrandr-Drehung automatisch!
                 if [[ -n "${ACTIVE_PRIMARY}" ]]; then
                     log "Binde Touch-Geraet ID=${dev_id} ('${TOUCH_DEVICE}') an Monitor '${ACTIVE_PRIMARY}'..."
                     if ! xinput map-to-output "${dev_id}" "${ACTIVE_PRIMARY}" >/dev/null 2>&1; then
@@ -248,8 +244,19 @@ if (( X11_AVAILABLE == 1 )) && [[ -n "${TOUCH_DEVICE}" ]]; then
                     fi
                 fi
 
-                # 2) Bestehende Output-Matrix auslesen und mit Rotationsmatrix kombinieren (M_out * R)
-                #    Damit bleibt die Zuordnung auch bei Dual-Monitor-Setups exakt erhalten!
+                # 2) Bei 'auto' oder '0' keine zusaetzliche Rotation aufmultiplizieren
+                if [[ "${TOUCH_ROTATION}" == "auto" || "${TOUCH_ROTATION}" == "0" ]]; then
+                    log "Touch-Ausrichtung fuer ID=${dev_id}: automatisch (folgt Display-Drehung)."
+                    continue
+                fi
+
+                # 3) Optionale manuelle Korrektur fuer physisch verdreht eingebaute Touch-Panels
+                case "${TOUCH_ROTATION}" in
+                    90)  ROT_MAT="0 1 0 -1 0 1 0 0 1" ;;
+                    180) ROT_MAT="-1 0 1 0 -1 1 0 0 1" ;;
+                    270) ROT_MAT="0 -1 1 1 0 0 0 0 1" ;;
+                esac
+
                 CURRENT_MAT="$(xinput list-props "${dev_id}" 2>/dev/null | awk -F: '
                     /Coordinate Transformation Matrix/ {
                         gsub(/,/, " ", $2)
@@ -274,7 +281,6 @@ if (( X11_AVAILABLE == 1 )) && [[ -n "${TOUCH_DEVICE}" ]]; then
                                     for (k = 0; k < 3; k++) {
                                         sum += A[i*3 + k + 1] * B[k*3 + j + 1]
                                     }
-                                    # Negatives Null vermeiden
                                     if (sum > -0.000001 && sum < 0.000001) sum = 0
                                     printf "%.6g%s", sum, (i==2 && j==2 ? "\n" : " ")
                                 }
@@ -285,7 +291,7 @@ if (( X11_AVAILABLE == 1 )) && [[ -n "${TOUCH_DEVICE}" ]]; then
                     FINAL_MAT="${ROT_MAT}"
                 fi
 
-                log "Setze Coordinate Transformation Matrix fuer ID=${dev_id} (${TOUCH_ROTATION} deg): ${FINAL_MAT}"
+                log "Wende manuelle Touch-Korrektur (+${TOUCH_ROTATION} deg) fuer ID=${dev_id} an: ${FINAL_MAT}"
                 # shellcheck disable=SC2086
                 if ! xinput set-prop "${dev_id}" "Coordinate Transformation Matrix" ${FINAL_MAT} 2>&1; then
                     warn "Konnte Coordinate Transformation Matrix fuer ID=${dev_id} nicht setzen."
@@ -308,10 +314,8 @@ else
     if [[ -n "${AUDIO_CARD}" && -n "${AUDIO_PROFILE}" ]]; then
         log "Setze Audio-Profil '${AUDIO_PROFILE}' auf Karte '${AUDIO_CARD}'..."
         if pactl set-card-profile "${AUDIO_CARD}" "${AUDIO_PROFILE}" 2>&1; then
-            # Kurz warten, bis PipeWire/WirePlumber den zugehoerigen Sink erstellt hat
             sleep 0.35
 
-            # Passenden Sink zur gewaehlten Soundkarte ermitteln
             CARD_SHORT="${AUDIO_CARD#alsa_card.}"
             FOUND_SINK="$(pactl list short sinks 2>/dev/null | awk -v key="${CARD_SHORT}" '
                 index($2, key) > 0 { print $2; exit }

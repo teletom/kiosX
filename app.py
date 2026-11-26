@@ -5,34 +5,49 @@ kiosX - Flask Backend & Web-UI zur Kiosk-Konfiguration fuer Ubuntu Server Mini-P
 
 from __future__ import annotations
 
+import atexit
 import copy
+import ipaddress
 import json
 import math
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
 import struct
 import subprocess
 import tempfile
+import threading
 import time
+import urllib.error
+import urllib.request
 import wave
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, send_file
 
 app = Flask(__name__)
 
 CONFIG_PATH = Path(os.environ.get("KIOSX_CONFIG", "/etc/kiosk/config.json"))
+WALLPAPER_PATH = Path(os.environ.get("KIOSX_WALLPAPER", "/etc/kiosk/wallpaper.jpg"))
 APPLY_SCRIPT = Path(os.environ.get("KIOSX_APPLY_SCRIPT", "/opt/kiosX/kiosk-apply.sh"))
 LISTEN_HOST = os.environ.get("KIOSX_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("KIOSX_PORT", "8080"))
 
+DEFAULT_WALLPAPER_URL = (
+    "https://images.unsplash.com/photo-1493606278519-11aa9f86e40a"
+    "?auto=format&fit=crop&w=1920&q=85"
+)
+DEVICE_ID_ALPHABET = "23456789ABCDEFGHJKMNPQRSTVWXYZ"
+DEVICE_ID_LENGTH = 4
+MAX_WALLPAPER_BYTES = 15 * 1024 * 1024  # 15 MB
+
 VALID_DISPLAY_ROTATIONS = ("normal", "right", "inverted", "left")
 VALID_SECONDARY_MODES = ("off", "right", "left", "mirror")
-VALID_TOUCH_ROTATIONS = ("0", "90", "180", "270")
+VALID_TOUCH_ROTATIONS = ("auto", "90", "180", "270")
 
 TOUCH_NAME_REGEX = re.compile(
     r"(touch|goodix|elan|egalax|ilitek|wacom|ft54|gt9|elo|3m|sis|atmel|"
@@ -41,7 +56,10 @@ TOUCH_NAME_REGEX = re.compile(
 )
 
 DEFAULT_CONFIG: dict[str, Any] = {
+    "device_id": "",
     "url": "https://example.com",
+    "splash_seconds": 15,
+    "wallpaper_url": DEFAULT_WALLPAPER_URL,
     "display": {
         "primary_output": "",
         "resolution": "auto",
@@ -51,7 +69,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "touch": {
         "device": "",
-        "rotation": "0",
+        "rotation": "auto",
     },
     "audio": {
         "card": "",
@@ -105,7 +123,7 @@ def get_touch_test_pid_file() -> Path:
 
 def resolve_chromium_binary() -> str | None:
     """Ermittelt das installierte Chromium-Binary (apt oder Snap)."""
-    for candidate in ("chromium", "chromium-browser", "/snap/bin/chromium"):
+    for candidate in ("chromium", "/snap/bin/chromium", "chromium-browser"):
         resolved = shutil.which(candidate)
         if resolved:
             return resolved
@@ -117,12 +135,165 @@ def resolve_chromium_binary() -> str | None:
 def get_touch_test_profile_dir(chrome_bin: str) -> Path:
     """Liefert ein Snap-kompatibles Profilverzeichnis fuer das Touch-Test-Fenster."""
     real_bin = os.path.realpath(chrome_bin)
-    if "/snap/" in chrome_bin or "/snap/" in real_bin:
+    is_snap = "/snap/" in chrome_bin or "/snap/" in real_bin or real_bin.endswith("/snap")
+    if not is_snap and os.path.isfile(chrome_bin):
+        try:
+            with open(chrome_bin, "rb") as fh:
+                head = fh.read(2048)
+            if head.startswith(b"#!") and b"snap" in head:
+                is_snap = True
+        except OSError:
+            pass
+
+    if is_snap:
         profile = Path.home() / "snap" / "chromium" / "common" / "kiosx-touch-test"
     else:
         profile = get_runtime_dir() / "kiosx-touch-test-profile"
     profile.mkdir(parents=True, exist_ok=True)
     return profile
+
+
+def generate_device_id(length: int = DEVICE_ID_LENGTH) -> str:
+    """Erzeugt eine kurze, verwechslungssichere Kiosk-ID (ohne 0/O/1/I/L/U)."""
+    return "".join(secrets.choice(DEVICE_ID_ALPHABET) for _ in range(length))
+
+
+def normalize_device_id(raw: Any) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]", "", str(raw or "")).upper()
+    if 2 <= len(cleaned) <= 12:
+        return cleaned
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Netzwerk-Erkennung (LAN, Tailscale, mDNS-Alias)
+# ---------------------------------------------------------------------------
+def get_network_addresses() -> dict[str, str]:
+    """Ermittelt LAN-IP und Tailscale-IP ueber 'ip -4 addr' mit Socket-Fallback."""
+    lan_ip = ""
+    tailscale_ip = ""
+
+    if shutil.which("ip"):
+        try:
+            res = run_cmd(["ip", "-4", "-o", "addr", "show", "scope", "global"], timeout=3)
+            if res.returncode == 0:
+                cgnat = ipaddress.ip_network("100.64.0.0/10")
+                for line in res.stdout.splitlines():
+                    parts = line.split()
+                    if len(parts) < 4:
+                        continue
+                    iface = parts[1]
+                    addr = parts[3].split("/")[0]
+                    try:
+                        ip_obj = ipaddress.ip_address(addr)
+                    except ValueError:
+                        continue
+                    if iface.startswith("tailscale") or ip_obj in cgnat:
+                        if not tailscale_ip:
+                            tailscale_ip = addr
+                    elif not iface.startswith(("docker", "br-", "veth", "virbr", "lxd")):
+                        if not lan_ip:
+                            lan_ip = addr
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    if not lan_ip:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                cand = s.getsockname()[0]
+                if not cand.startswith("100."):
+                    lan_ip = cand
+                elif not tailscale_ip:
+                    tailscale_ip = cand
+        except OSError:
+            pass
+
+    return {"lan_ip": lan_ip, "tailscale_ip": tailscale_ip}
+
+
+class MdnsAliasManager:
+    """Veroeffentlicht den kurzen mDNS-Alias kiosx-<id>.local ueber avahi-publish."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._proc: subprocess.Popen[bytes] | None = None
+        self._current_alias: str = ""
+        self._current_ip: str = ""
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if not shutil.which("avahi-publish"):
+            return
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._loop, name="kiosx-mdns", daemon=True)
+        self._thread.start()
+        atexit.register(self.stop)
+
+    def sync_now(self, device_id: str | None = None) -> None:
+        if not shutil.which("avahi-publish"):
+            return
+        with self._lock:
+            dev_id = normalize_device_id(device_id) if device_id else normalize_device_id(load_config().get("device_id"))
+            if not dev_id:
+                return
+            alias = f"kiosx-{dev_id.lower()}.local"
+            addrs = get_network_addresses()
+            ip_addr = addrs["lan_ip"]
+            if not ip_addr:
+                return
+
+            if (
+                self._proc is not None
+                and self._proc.poll() is None
+                and self._current_alias == alias
+                and self._current_ip == ip_addr
+            ):
+                return
+
+            self._terminate_locked()
+            try:
+                self._proc = subprocess.Popen(
+                    ["avahi-publish", "-a", "-R", alias, ip_addr],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                self._current_alias = alias
+                self._current_ip = ip_addr
+            except OSError:
+                self._proc = None
+
+    def _loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                self.sync_now()
+            except Exception:
+                pass
+            self._stop_event.wait(30.0)
+
+    def _terminate_locked(self) -> None:
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+                self._proc.wait(timeout=2)
+            except Exception:
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+            self._proc = None
+            self._current_alias = ""
+            self._current_ip = ""
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        with self._lock:
+            self._terminate_locked()
+
+
+mdns_manager = MdnsAliasManager()
 
 
 # ---------------------------------------------------------------------------
@@ -133,8 +304,20 @@ def merge_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return cfg
 
+    if isinstance(raw.get("device_id"), str):
+        cfg["device_id"] = normalize_device_id(raw["device_id"])
+
     if isinstance(raw.get("url"), str) and raw["url"].strip():
         cfg["url"] = raw["url"].strip()
+
+    if "splash_seconds" in raw and raw["splash_seconds"] is not None:
+        try:
+            cfg["splash_seconds"] = max(0, min(120, int(raw["splash_seconds"])))
+        except (TypeError, ValueError):
+            cfg["splash_seconds"] = 15
+
+    if "wallpaper_url" in raw and raw["wallpaper_url"] is not None:
+        cfg["wallpaper_url"] = str(raw["wallpaper_url"]).strip()
 
     for section in ("display", "touch", "audio"):
         sub = raw.get(section)
@@ -143,8 +326,10 @@ def merge_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
                 if key in sub and sub[key] is not None:
                     cfg[section][key] = sub[key]
 
-    # Typen normalisieren
-    cfg["touch"]["rotation"] = str(cfg["touch"]["rotation"])
+    # Legacy touch.rotation == "0" sauber auf "auto" mappen
+    touch_rot = str(cfg["touch"]["rotation"]).strip().lower()
+    cfg["touch"]["rotation"] = "auto" if touch_rot in ("", "0", "auto") else touch_rot
+
     try:
         cfg["audio"]["volume"] = max(0, min(100, int(cfg["audio"]["volume"])))
     except (TypeError, ValueError):
@@ -153,30 +338,81 @@ def merge_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
     return cfg
 
 
-def load_config() -> dict[str, Any]:
+def load_config(ensure_id: bool = True) -> dict[str, Any]:
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
+    loaded_from_disk = False
     try:
         if CONFIG_PATH.is_file():
             with CONFIG_PATH.open("r", encoding="utf-8") as fh:
-                return merge_defaults(json.load(fh))
+                cfg = merge_defaults(json.load(fh))
+                loaded_from_disk = True
     except (OSError, json.JSONDecodeError):
         pass
-    return copy.deepcopy(DEFAULT_CONFIG)
+
+    if ensure_id and not cfg["device_id"]:
+        cfg["device_id"] = generate_device_id()
+        if loaded_from_disk or os.access(CONFIG_PATH.parent, os.W_OK):
+            try:
+                save_config_atomic(cfg)
+            except OSError:
+                pass
+    return cfg
 
 
-def validate_and_normalize_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+def _validate_http_url(url: str, allow_file: bool = True) -> tuple[str | None, str | None]:
+    url = url.strip()
+    if not url:
+        return "", None
+    allowed_re = r"^(https?://|file://)" if allow_file else r"^https?://"
+    if not re.match(allowed_re, url, re.IGNORECASE):
+        if "://" in url or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:(?!\d+(/|$))", url):
+            allowed_txt = "http://, https:// oder file://" if allow_file else "http:// oder https://"
+            return None, f"Nur {allowed_txt} URLs sind zulaessig."
+        url = f"https://{url}"
+    return url, None
+
+
+def validate_and_normalize_payload(
+    payload: dict[str, Any],
+    existing_config: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(payload, dict):
         return None, "Ungueltiges Anfrageformat (JSON-Objekt erwartet)."
 
     cfg = merge_defaults(payload)
 
-    url = cfg["url"].strip()
-    if not url:
-        return None, "Bitte eine gueltige Kiosk-URL angeben."
-    if not re.match(r"^(https?://|file://)", url, re.IGNORECASE):
-        if "://" in url or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:(?!\d+(/|$))", url):
-            return None, "Nur http://, https:// oder file:// URLs sind zulaessig."
-        url = f"https://{url}"
+    # Kiosk-ID validieren oder bestehende behalten / generieren
+    raw_id = payload.get("device_id")
+    if raw_id is not None and str(raw_id).strip():
+        norm_id = normalize_device_id(raw_id)
+        if not norm_id:
+            return None, "Kiosk-ID muss aus 2 bis 12 Buchstaben/Zahlen bestehen."
+        cfg["device_id"] = norm_id
+    else:
+        fallback_id = (existing_config or {}).get("device_id") or generate_device_id()
+        cfg["device_id"] = normalize_device_id(fallback_id) or generate_device_id()
+
+    url, url_err = _validate_http_url(cfg["url"], allow_file=True)
+    if url_err or not url:
+        return None, url_err or "Bitte eine gueltige Kiosk-URL angeben."
     cfg["url"] = url
+
+    # Start-Anzeige Dauer (0 = deaktiviert, 1..120 Sekunden)
+    try:
+        splash_sec = int(payload.get("splash_seconds", cfg["splash_seconds"]))
+        cfg["splash_seconds"] = max(0, min(120, splash_sec))
+    except (TypeError, ValueError):
+        return None, "Start-Anzeige-Dauer muss eine Zahl zwischen 0 und 120 Sekunden sein."
+
+    # Optionales Hintergrundbild (leer = Standard / kein Download)
+    wp_raw = str(payload.get("wallpaper_url", cfg["wallpaper_url"]) or "").strip()
+    if wp_raw:
+        wp_url, wp_err = _validate_http_url(wp_raw, allow_file=False)
+        if wp_err:
+            return None, f"Hintergrundbild-URL: {wp_err}"
+        cfg["wallpaper_url"] = wp_url or ""
+    else:
+        cfg["wallpaper_url"] = ""
 
     disp = cfg["display"]
     disp["primary_output"] = str(disp.get("primary_output", "")).strip()
@@ -197,9 +433,12 @@ def validate_and_normalize_payload(payload: dict[str, Any]) -> tuple[dict[str, A
 
     touch = cfg["touch"]
     touch["device"] = str(touch.get("device", "")).strip()
-    touch["rotation"] = str(touch.get("rotation", "0")).strip()
-    if touch["rotation"] not in VALID_TOUCH_ROTATIONS:
-        return None, f"Ungueltige Touch-Ausrichtung: {touch['rotation']}"
+    touch_rot = str(touch.get("rotation", "auto")).strip().lower()
+    if touch_rot == "0":
+        touch_rot = "auto"
+    if touch_rot not in VALID_TOUCH_ROTATIONS:
+        return None, f"Ungueltige Touch-Korrektur: {touch_rot}"
+    touch["rotation"] = touch_rot
 
     audio = cfg["audio"]
     audio["card"] = str(audio.get("card", "")).strip()
@@ -237,6 +476,64 @@ def save_config_atomic(cfg: dict[str, Any]) -> None:
             pass
         os.replace(tmp_path, CONFIG_PATH)
         tmp_path = None
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def download_wallpaper_atomic(url: str) -> tuple[bool, str | None]:
+    """Laedt das Hintergrundbild sicher herunter und speichert es atomar nach WALLPAPER_PATH."""
+    if not url:
+        return True, None
+
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "kiosX/1.0 (+https://github.com/teletom/kiosX)"},
+    )
+    tmp_path: str | None = None
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            data = resp.read(MAX_WALLPAPER_BYTES + 1)
+            if len(data) > MAX_WALLPAPER_BYTES:
+                return False, "Hintergrundbild ist groesser als 15 MB."
+            if len(data) < 32:
+                return False, "Heruntergeladene Datei ist leer oder ungueltig."
+
+            # Einfache Magic-Byte-Pruefung fuer JPEG / PNG / WebP / GIF
+            is_image = (
+                data.startswith(b"\xff\xd8\xff")
+                or data.startswith(b"\x89PNG\r\n\x1a\n")
+                or (data.startswith(b"RIFF") and data[8:12] == b"WEBP")
+                or data.startswith((b"GIF87a", b"GIF89a"))
+            )
+            if not is_image:
+                return False, "URL liefert kein gueltiges Bildformat (JPEG, PNG oder WebP erwartet)."
+
+        WALLPAPER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=str(WALLPAPER_PATH.parent),
+            prefix=".wallpaper.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp_file:
+            tmp_path = tmp_file.name
+            tmp_file.write(data)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+
+        try:
+            os.chmod(tmp_path, 0o664)
+        except OSError:
+            pass
+        os.replace(tmp_path, WALLPAPER_PATH)
+        tmp_path = None
+        return True, None
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return False, f"Hintergrundbild konnte nicht geladen werden: {exc}"
     finally:
         if tmp_path and os.path.exists(tmp_path):
             try:
@@ -456,12 +753,11 @@ def get_audio_cards() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Touch-Test & Browser-Steuerung
+# Touch-Test, Browser-Steuerung & QR-Code
 # ---------------------------------------------------------------------------
 def is_pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-        # Zombie-Prozesse ausschliessen
         stat_path = Path(f"/proc/{pid}/stat")
         if stat_path.is_file():
             content = stat_path.read_text(encoding="utf-8", errors="ignore")
@@ -521,7 +817,6 @@ def stop_touch_test() -> bool:
                     pass
         stopped = True
 
-    # Sicherheitshalber eventuelle Restprozesse mit dem Touch-Test-Profil beenden
     try:
         run_cmd(["pkill", "-f", "kiosx-touch-test"], timeout=3)
     except OSError:
@@ -537,7 +832,6 @@ def start_touch_test() -> tuple[bool, str]:
     if not chrome_bin:
         return False, "Chromium ist nicht installiert."
 
-    # Pruefen, ob X11 erreichbar ist
     if shutil.which("xset"):
         check = run_cmd(["xset", "q"], timeout=4)
         if check.returncode != 0:
@@ -588,33 +882,80 @@ def is_browser_running() -> bool:
         return False
 
 
-def get_system_info() -> dict[str, Any]:
+def build_device_info(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    cfg = cfg or load_config()
     hostname = socket.gethostname()
-    ip_addr = ""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            ip_addr = s.getsockname()[0]
-    except OSError:
-        ip_addr = "127.0.0.1"
+    device_id = cfg.get("device_id") or ""
+    addrs = get_network_addresses()
+    lan_ip = addrs["lan_ip"]
+    tailscale_ip = addrs["tailscale_ip"]
+
+    mdns_host = f"{hostname}.local"
+    mdns_alias = f"kiosx-{device_id.lower()}.local" if device_id else mdns_host
+
+    lan_url = f"http://{lan_ip}:{LISTEN_PORT}" if lan_ip else ""
+    tailscale_url = f"http://{tailscale_ip}:{LISTEN_PORT}" if tailscale_ip else ""
+    mdns_url = f"http://{mdns_alias}:{LISTEN_PORT}"
+    primary_config_url = lan_url or tailscale_url or mdns_url
 
     return {
+        "device_id": device_id,
         "hostname": hostname,
-        "ip": ip_addr,
+        "lan_ip": lan_ip,
+        "tailscale_ip": tailscale_ip,
+        "ip": lan_ip or tailscale_ip or "127.0.0.1",
+        "mdns_host": mdns_host,
+        "mdns_alias": mdns_alias,
         "port": LISTEN_PORT,
+        "config_url": primary_config_url,
+        "lan_url": lan_url,
+        "tailscale_url": tailscale_url,
+        "mdns_url": mdns_url,
+        "target_url": cfg.get("url", "https://example.com"),
+        "splash_seconds": cfg.get("splash_seconds", 15),
+        "has_wallpaper": WALLPAPER_PATH.is_file() and WALLPAPER_PATH.stat().st_size > 0,
         "config_path": str(CONFIG_PATH),
         "touch_test_active": get_touch_test_pid() is not None,
         "browser_running": is_browser_running(),
     }
 
 
-def collect_hardware() -> dict[str, Any]:
+def collect_hardware(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "displays": get_displays(),
         "touch": get_touch_devices(),
         "audio": get_audio_cards(),
-        "system": get_system_info(),
+        "system": build_device_info(cfg),
     }
+
+
+def generate_qr_svg(data: str) -> str | None:
+    """Erzeugt einen lokalen Inline-SVG-QR-Code via qrencode (oder python3-qrcode Fallback)."""
+    if shutil.which("qrencode"):
+        try:
+            res = subprocess.run(
+                ["qrencode", "-t", "SVG", "-m", "2", "--svg-path", "-o", "-", data],
+                capture_output=True,
+                text=True,
+                timeout=4,
+                check=False,
+            )
+            if res.returncode == 0 and "<svg" in res.stdout:
+                return res.stdout
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    try:
+        import io
+        import qrcode  # type: ignore
+        import qrcode.image.svg  # type: ignore
+
+        buf = io.BytesIO()
+        img = qrcode.make(data, image_factory=qrcode.image.svg.SvgPathImage, box_size=10, border=2)
+        img.save(buf)
+        return buf.getvalue().decode("utf-8")
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -634,16 +975,13 @@ def generate_stereo_test_wav(path: str) -> None:
         right = 0.0
 
         if 0.0 <= t < 0.38:
-            # Linker Kanal (440 Hz)
             env = min(1.0, t / 0.02, max(0.0, (0.38 - t) / 0.03))
             left = math.sin(2.0 * math.pi * 440.0 * t) * env
         elif 0.42 <= t < 0.80:
-            # Rechter Kanal (554.37 Hz)
             dt = t - 0.42
             env = min(1.0, dt / 0.02, max(0.0, (0.80 - t) / 0.03))
             right = math.sin(2.0 * math.pi * 554.37 * t) * env
         elif 0.84 <= t < 1.18:
-            # Beide Kanaele (659.25 Hz)
             dt = t - 0.84
             env = min(1.0, dt / 0.02, max(0.0, (1.18 - t) / 0.05))
             tone = math.sin(2.0 * math.pi * 659.25 * t) * env
@@ -667,23 +1005,71 @@ def generate_stereo_test_wav(path: str) -> None:
 @app.route("/", methods=["GET"])
 def index():
     config = load_config()
-    hardware = collect_hardware()
+    hardware = collect_hardware(config)
     return render_template("index.html", config=config, hardware=hardware)
+
+
+@app.route("/splash", methods=["GET"])
+def splash():
+    config = load_config()
+    info = build_device_info(config)
+    return render_template("splash.html", info=info, config=config)
+
+
+@app.route("/api/info", methods=["GET"])
+def api_info():
+    config = load_config()
+    info = build_device_info(config)
+    return jsonify({"ok": True, **info})
 
 
 @app.route("/api/hardware", methods=["GET"])
 def api_hardware():
-    return jsonify({"ok": True, "hardware": collect_hardware(), "config": load_config()})
+    config = load_config()
+    return jsonify({"ok": True, "hardware": collect_hardware(config), "config": config})
+
+
+@app.route("/wallpaper.jpg", methods=["GET"])
+def wallpaper_file():
+    if WALLPAPER_PATH.is_file() and WALLPAPER_PATH.stat().st_size > 0:
+        resp = send_file(str(WALLPAPER_PATH), mimetype="image/jpeg")
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        return resp
+    return Response(status=404)
+
+
+@app.route("/qr.svg", methods=["GET"])
+def qr_svg():
+    info = build_device_info()
+    target = (request.args.get("target") or "auto").strip().lower()
+    if target == "tailscale" and info["tailscale_url"]:
+        url = info["tailscale_url"]
+    elif target == "mdns":
+        url = info["mdns_url"]
+    else:
+        url = info["config_url"]
+
+    svg = generate_qr_svg(url)
+    if not svg:
+        return Response(status=404)
+    return Response(
+        svg,
+        mimetype="image/svg+xml",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @app.route("/save", methods=["POST"])
 def save_settings():
+    existing_cfg = load_config()
     payload = request.get_json(silent=True)
     if payload is None:
-        # Fallback fuer klassische Formular-Uebermittlung
         form = request.form
         payload = {
+            "device_id": form.get("device_id", existing_cfg.get("device_id", "")),
             "url": form.get("url", ""),
+            "splash_seconds": form.get("splash_seconds", 15),
+            "wallpaper_url": form.get("wallpaper_url", ""),
             "display": {
                 "primary_output": form.get("primary_output", ""),
                 "resolution": form.get("resolution", "auto"),
@@ -693,7 +1079,7 @@ def save_settings():
             },
             "touch": {
                 "device": form.get("touch_device", ""),
-                "rotation": form.get("touch_rotation", "0"),
+                "rotation": form.get("touch_rotation", "auto"),
             },
             "audio": {
                 "card": form.get("audio_card", ""),
@@ -702,9 +1088,19 @@ def save_settings():
             },
         }
 
-    cfg, err_msg = validate_and_normalize_payload(payload)
+    cfg, err_msg = validate_and_normalize_payload(payload, existing_config=existing_cfg)
     if err_msg or cfg is None:
         return jsonify({"ok": False, "message": err_msg}), 400
+
+    warnings: list[str] = []
+
+    # Optionales Hintergrundbild herunterladen, falls URL geaendert wurde oder Datei fehlt
+    new_wp = cfg.get("wallpaper_url", "")
+    old_wp = existing_cfg.get("wallpaper_url", "")
+    if new_wp and (new_wp != old_wp or not WALLPAPER_PATH.is_file()):
+        wp_ok, wp_err = download_wallpaper_atomic(new_wp)
+        if not wp_ok and wp_err:
+            warnings.append(f"[kiosX WARN] {wp_err}")
 
     try:
         save_config_atomic(cfg)
@@ -719,8 +1115,10 @@ def save_settings():
             500,
         )
 
+    # mDNS-Alias sofort aktualisieren, falls sich die Kiosk-ID geaendert hat
+    mdns_manager.sync_now(cfg.get("device_id"))
+
     apply_output = ""
-    warnings: list[str] = []
     apply_ok = True
 
     if APPLY_SCRIPT.is_file():
@@ -728,9 +1126,9 @@ def save_settings():
             res = run_cmd(["/usr/bin/env", "bash", str(APPLY_SCRIPT)], timeout=15)
             combined = "\n".join(part for part in (res.stdout.strip(), res.stderr.strip()) if part)
             apply_output = combined
-            warnings = [
+            warnings.extend(
                 line for line in combined.splitlines() if "[kiosX WARN]" in line or "[kiosX ERROR]" in line
-            ]
+            )
             if res.returncode != 0:
                 apply_ok = False
         except subprocess.TimeoutExpired:
@@ -768,6 +1166,7 @@ def save_settings():
             "warnings": warnings,
             "output": apply_output,
             "config": cfg,
+            "info": build_device_info(cfg),
         }
     )
 
@@ -776,7 +1175,6 @@ def save_settings():
 def test_audio():
     tmp_wav: str | None = None
     try:
-        # 1. Bevorzugt: Stereo-Testton per paplay direkt ueber den aktiven PipeWire-Sink
         if shutil.which("paplay"):
             fd, tmp_wav = tempfile.mkstemp(prefix="kiosx-audio-test-", suffix=".wav")
             os.close(fd)
@@ -794,7 +1192,6 @@ def test_audio():
         else:
             paplay_err = "paplay nicht installiert"
 
-        # 2. Fallback: speaker-test -t wav -c 2 -l 1
         if shutil.which("speaker-test"):
             res = run_cmd(["speaker-test", "-t", "wav", "-c", "2", "-l", "1"], timeout=10)
             if res.returncode == 0:
@@ -869,7 +1266,6 @@ def touch_test():
 @app.route("/restart-browser", methods=["POST"])
 def restart_browser():
     """Beendet den laufenden Chromium-Kiosk-Prozess, sodass der Watchdog ihn sauber neu startet."""
-    # Falls Touch-Test offen ist, ebenfalls schliessen
     stop_touch_test()
 
     patterns = [
@@ -883,7 +1279,6 @@ def restart_browser():
             signalled = True
 
     if not signalled:
-        # Fallback: regulaeren Chromium-Prozess des aktuellen Benutzers beenden
         uid = str(os.getuid())
         for proc_name in ("chromium", "chromium-browser", "chrome"):
             res = run_cmd(["pkill", "-TERM", "-u", uid, "-x", proc_name], timeout=4)
@@ -910,4 +1305,7 @@ def restart_browser():
 
 
 if __name__ == "__main__":
+    # Kiosk-ID beim Start sicherstellen und mDNS-Alias (kiosx-<id>.local) aktivieren
+    load_config(ensure_id=True)
+    mdns_manager.start()
     app.run(host=LISTEN_HOST, port=LISTEN_PORT, debug=False, threaded=True)

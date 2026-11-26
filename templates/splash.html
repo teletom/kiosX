@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>kiosX &ndash; {{ info.device_id }} ({{ info.hostname }})</title>
+  <style>
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      color: #f8fafc;
+      background:
+        linear-gradient(145deg, rgba(15, 23, 42, 0.72), rgba(2, 6, 23, 0.86)),
+        url("/wallpaper.jpg") center center / cover no-repeat,
+        radial-gradient(circle at 20% 20%, #1e293b, #020617);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+
+    .card {
+      width: min(820px, 94vw);
+      background: rgba(15, 23, 42, 0.78);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(148, 163, 184, 0.28);
+      border-radius: 1.5rem;
+      padding: 2.2rem 2.4rem;
+      box-shadow: 0 28px 70px rgba(0, 0, 0, 0.55);
+    }
+
+    .header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding-bottom: 1.4rem;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+      margin-bottom: 1.5rem;
+    }
+
+    .title-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+    }
+
+    .eyebrow {
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: #93c5fd;
+      font-weight: 700;
+    }
+
+    .hostname {
+      font-size: clamp(1.6rem, 3.2vw, 2.3rem);
+      font-weight: 700;
+      margin: 0;
+      line-height: 1.15;
+    }
+
+    .id-box {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      background: linear-gradient(135deg, #2563eb, #1d4ed8);
+      border-radius: 1rem;
+      padding: 0.7rem 1.4rem;
+      min-width: 150px;
+      box-shadow: 0 10px 26px rgba(37, 99, 235, 0.42);
+    }
+
+    .id-box small {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      opacity: 0.85;
+    }
+
+    .id-code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: clamp(2rem, 4.5vw, 2.8rem);
+      font-weight: 900;
+      letter-spacing: 0.18em;
+      line-height: 1.1;
+      padding-left: 0.18em;
+    }
+
+    .body-grid {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 1.8rem;
+      align-items: center;
+    }
+
+    .info-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.85rem;
+      min-width: 0;
+    }
+
+    .info-row {
+      background: rgba(2, 6, 23, 0.45);
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 0.75rem;
+      padding: 0.75rem 1rem;
+    }
+
+    .info-label {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #94a3b8;
+      margin-bottom: 0.2rem;
+    }
+
+    .info-val {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: clamp(0.95rem, 2vw, 1.18rem);
+      color: #f8fafc;
+      word-break: break-all;
+    }
+
+    .qr-panel {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.55rem;
+      background: #ffffff;
+      color: #0f172a;
+      border-radius: 1rem;
+      padding: 0.9rem;
+      width: 196px;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+    }
+
+    .qr-panel img {
+      width: 168px;
+      height: 168px;
+      display: block;
+    }
+
+    .qr-caption {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-align: center;
+      color: #334155;
+    }
+
+    .footer {
+      margin-top: 1.6rem;
+      padding-top: 1.2rem;
+      border-top: 1px solid rgba(148, 163, 184, 0.22);
+    }
+
+    .progress-track {
+      width: 100%;
+      height: 8px;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.22);
+      overflow: hidden;
+      margin-bottom: 0.95rem;
+    }
+
+    .progress-fill {
+      height: 100%;
+      width: 100%;
+      background: linear-gradient(90deg, #38bdf8, #3b82f6);
+      border-radius: 999px;
+      transition: width 0.25s linear;
+    }
+
+    .footer-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.85rem;
+    }
+
+    .target-text {
+      font-size: 0.9rem;
+      color: #cbd5e1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 100%;
+    }
+
+    .target-text strong {
+      color: #ffffff;
+    }
+
+    button#btn-skip {
+      border: 1px solid rgba(248, 250, 252, 0.35);
+      background: rgba(248, 250, 252, 0.12);
+      color: #ffffff;
+      border-radius: 0.65rem;
+      padding: 0.6rem 1.2rem;
+      font-size: 0.92rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    button#btn-skip:active {
+      transform: scale(0.98);
+    }
+
+    @media (max-width: 680px) {
+      .card { padding: 1.5rem; }
+      .body-grid { grid-template-columns: 1fr; justify-items: center; }
+      .info-list { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <div class="title-wrap">
+        <span class="eyebrow">kiosX &middot; Systembereit</span>
+        <h1 class="hostname" id="el-hostname">{{ info.hostname }}</h1>
+      </div>
+      <div class="id-box">
+        <small>Kiosk-ID</small>
+        <div class="id-code" id="el-id">{{ info.device_id }}</div>
+      </div>
+    </div>
+
+    <div class="body-grid">
+      <div class="info-list">
+        <div class="info-row">
+          <div class="info-label">LAN-Konfiguration</div>
+          <div class="info-val" id="el-lan">{{ info.lan_url or "Warte auf Netzwerk…" }}</div>
+        </div>
+
+        <div class="info-row">
+          <div class="info-label">mDNS (LAN ohne IP)</div>
+          <div class="info-val" id="el-mdns">{{ info.mdns_url }}</div>
+        </div>
+
+        <div class="info-row" id="row-tailscale" {% if not info.tailscale_url %}style="display:none;"{% endif %}>
+          <div class="info-label">Tailscale</div>
+          <div class="info-val" id="el-tailscale">{{ info.tailscale_url }}</div>
+        </div>
+      </div>
+
+      <div class="qr-panel" id="qr-panel">
+        <img id="el-qr" src="/qr.svg" alt="QR-Code zur Kiosk-Konfiguration" onerror="document.getElementById('qr-panel').style.display='none'">
+        <div class="qr-caption">Config-UI scannen</div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div class="progress-track">
+        <div class="progress-fill" id="progress-fill"></div>
+      </div>
+      <div class="footer-row">
+        <div class="target-text">
+          Starte <strong id="el-target">{{ info.target_url }}</strong> in <strong id="el-sec">{{ info.splash_seconds }}</strong>&nbsp;s&hellip;
+        </div>
+        <button type="button" id="btn-skip">Sofort starten</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let targetUrl = {{ info.target_url | tojson }};
+    const totalSeconds = Math.max(0, parseInt({{ info.splash_seconds | tojson }}, 10) || 0);
+    let lastQrUrl = {{ info.config_url | tojson }};
+    let redirected = false;
+
+    function launchTarget() {
+      if (redirected) return;
+      redirected = true;
+      window.location.replace(targetUrl || "https://example.com");
+    }
+
+    if (totalSeconds === 0) {
+      launchTarget();
+    }
+
+    const startTime = Date.now();
+    const fillEl = document.getElementById("progress-fill");
+    const secEl = document.getElementById("el-sec");
+
+    const tickTimer = setInterval(() => {
+      const elapsed = (Date.now() - startTime) / 1000;
+      const remaining = Math.max(0, totalSeconds - elapsed);
+      secEl.textContent = Math.ceil(remaining);
+      fillEl.style.width = `${Math.max(0, (remaining / totalSeconds) * 100)}%`;
+      if (remaining <= 0) {
+        clearInterval(tickTimer);
+        launchTarget();
+      }
+    }, 200);
+
+    // Live-Update der Netzwerkadressen waehrend des Countdowns (falls DHCP/Tailscale noch verbindet)
+    const pollTimer = setInterval(async () => {
+      if (redirected) {
+        clearInterval(pollTimer);
+        return;
+      }
+      try {
+        const res = await fetch("/api/info", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data.ok) return;
+
+        document.getElementById("el-hostname").textContent = data.hostname || "";
+        document.getElementById("el-id").textContent = data.device_id || "";
+        document.getElementById("el-lan").textContent = data.lan_url || "Warte auf Netzwerk…";
+        document.getElementById("el-mdns").textContent = data.mdns_url || "";
+        if (data.target_url) {
+          targetUrl = data.target_url;
+          document.getElementById("el-target").textContent = data.target_url;
+        }
+
+        const tsRow = document.getElementById("row-tailscale");
+        if (data.tailscale_url) {
+          document.getElementById("el-tailscale").textContent = data.tailscale_url;
+          tsRow.style.display = "";
+        }
+
+        if (data.config_url && data.config_url !== lastQrUrl) {
+          lastQrUrl = data.config_url;
+          const qrImg = document.getElementById("el-qr");
+          qrImg.src = `/qr.svg?t=${Date.now()}`;
+          document.getElementById("qr-panel").style.display = "";
+        }
+      } catch (_) {}
+    }, 2000);
+
+    document.getElementById("btn-skip").addEventListener("click", launchTarget);
+  </script>
+</body>
+</html>
