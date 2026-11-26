@@ -1267,6 +1267,8 @@ def touch_test():
 def restart_browser():
     """Beendet den laufenden Chromium-Kiosk-Prozess, sodass der Watchdog ihn sauber neu startet."""
     stop_touch_test()
+    # Eventuelle Pause durch 'kiosx stop' wieder aufheben
+    (get_runtime_dir() / "kiosx-browser.paused").unlink(missing_ok=True)
 
     patterns = [
         "kiosx-profile",

@@ -1,0 +1,503 @@
+#!/usr/bin/env bash
+# =============================================================================
+# kiosx - Kommandozeilen-Tool zur Steuerung von kiosX (auch ueber SSH)
+# =============================================================================
+# Verwendung:
+#   kiosx status | start | stop | restart | apply | url [neue-url] | id
+#   kiosx ui [start|stop|restart|status]
+#   kiosx logs [ui|browser|apply]
+#   kiosx update
+# =============================================================================
+
+set -euo pipefail
+
+# Echten Repo-Pfad auch ueber Symlink (/usr/local/bin/kiosx) aufloesen
+SOURCE_PATH="${BASH_SOURCE[0]}"
+while [[ -L "${SOURCE_PATH}" ]]; do
+    LINK_DIR="$(cd -P "$(dirname "${SOURCE_PATH}")" && pwd)"
+    SOURCE_PATH="$(readlink "${SOURCE_PATH}")"
+    [[ "${SOURCE_PATH}" != /* ]] && SOURCE_PATH="${LINK_DIR}/${SOURCE_PATH}"
+done
+REPO_DIR="$(cd -P "$(dirname "${SOURCE_PATH}")" && pwd)"
+
+CONFIG_FILE="${KIOSX_CONFIG:-/etc/kiosk/config.json}"
+WALLPAPER_FILE="${KIOSX_WALLPAPER:-/etc/kiosk/wallpaper.jpg}"
+SERVICE_NAME="kiosk-ui.service"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}"
+
+# Farben nur bei interaktivem Terminal aktivieren
+if [[ -t 1 ]]; then
+    C_BLUE=$'\033[1;34m'
+    C_GREEN=$'\033[1;32m'
+    C_YELLOW=$'\033[1;33m'
+    C_RED=$'\033[1;31m'
+    C_BOLD=$'\033[1m'
+    C_DIM=$'\033[2m'
+    C_RESET=$'\033[0m'
+else
+    C_BLUE="" C_GREEN="" C_YELLOW="" C_RED="" C_BOLD="" C_DIM="" C_RESET=""
+fi
+
+info() { printf '%s[kiosX]%s %s\n' "${C_BLUE}" "${C_RESET}" "$*"; }
+ok()   { printf '%s[kiosX]%s %s\n' "${C_GREEN}" "${C_RESET}" "$*"; }
+warn() { printf '%s[kiosX WARN]%s %s\n' "${C_YELLOW}" "${C_RESET}" "$*" >&2; }
+err()  { printf '%s[kiosX ERROR]%s %s\n' "${C_RED}" "${C_RESET}" "$*" >&2; }
+
+# -----------------------------------------------------------------------------
+# Kiosk-Benutzer und X11-/PipeWire-Umgebung automatisch ermitteln (SSH-sicher)
+# -----------------------------------------------------------------------------
+detect_kiosk_user() {
+    if [[ -n "${KIOSK_USER:-}" ]]; then
+        printf '%s\n' "${KIOSK_USER}"
+        return 0
+    fi
+    if [[ -r "${SERVICE_FILE}" ]]; then
+        local svc_user
+        svc_user="$(awk -F= '/^User=/ {print $2; exit}' "${SERVICE_FILE}")"
+        if [[ -n "${svc_user}" ]] && id "${svc_user}" &>/dev/null; then
+            printf '%s\n' "${svc_user}"
+            return 0
+        fi
+    fi
+    if [[ -e "${CONFIG_FILE}" ]]; then
+        local owner
+        owner="$(stat -c '%U' "${CONFIG_FILE}" 2>/dev/null || true)"
+        if [[ -n "${owner}" && "${owner}" != "root" ]] && id "${owner}" &>/dev/null; then
+            printf '%s\n' "${owner}"
+            return 0
+        fi
+    fi
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        printf '%s\n' "${SUDO_USER}"
+        return 0
+    fi
+    id -un
+}
+
+detect_kiosk_port() {
+    if [[ -n "${KIOSX_PORT:-}" ]]; then
+        printf '%s\n' "${KIOSX_PORT}"
+        return 0
+    fi
+    if [[ -r "${SERVICE_FILE}" ]]; then
+        local p
+        p="$(sed -n 's/^Environment=KIOSX_PORT=\([0-9][0-9]*\)$/\1/p' "${SERVICE_FILE}" | head -n1)"
+        if [[ -n "${p}" ]]; then
+            printf '%s\n' "${p}"
+            return 0
+        fi
+    fi
+    printf '8080\n'
+}
+
+KIOSK_USER="$(detect_kiosk_user)"
+KIOSK_UID="$(id -u "${KIOSK_USER}")"
+KIOSK_HOME="$(getent passwd "${KIOSK_USER}" | cut -d: -f6)"
+KIOSK_PORT="$(detect_kiosk_port)"
+
+RUNTIME_DIR="/run/user/${KIOSK_UID}"
+if [[ ! -d "${RUNTIME_DIR}" ]]; then
+    RUNTIME_DIR="/tmp"
+fi
+
+PAUSE_FLAG="${RUNTIME_DIR}/kiosx-browser.paused"
+WATCHDOG_PID_FILE="${RUNTIME_DIR}/kiosx-watchdog.pid"
+
+# Befehl im Kontext des Kiosk-Benutzers mit vollstaendiger X11/PipeWire-Umgebung ausfuehren
+run_as_kiosk() {
+    local env_args=(
+        "HOME=${KIOSK_HOME}"
+        "DISPLAY=:0"
+        "XAUTHORITY=${KIOSK_HOME}/.Xauthority"
+        "XDG_RUNTIME_DIR=/run/user/${KIOSK_UID}"
+        "PULSE_RUNTIME_PATH=/run/user/${KIOSK_UID}/pulse"
+        "KIOSX_CONFIG=${CONFIG_FILE}"
+        "KIOSX_WALLPAPER=${WALLPAPER_FILE}"
+        "KIOSX_PORT=${KIOSK_PORT}"
+        "PATH=/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    )
+    if [[ "$(id -un)" == "${KIOSK_USER}" ]]; then
+        env "${env_args[@]}" "$@"
+    elif [[ "${EUID}" -eq 0 ]]; then
+        runuser -u "${KIOSK_USER}" -- env "${env_args[@]}" "$@"
+    else
+        sudo -u "${KIOSK_USER}" env "${env_args[@]}" "$@"
+    fi
+}
+
+run_systemctl() {
+    if [[ "${EUID}" -eq 0 ]]; then
+        systemctl "$@"
+    else
+        sudo systemctl "$@"
+    fi
+}
+
+is_x11_up() {
+    run_as_kiosk xset q >/dev/null 2>&1
+}
+
+is_browser_running() {
+    pgrep -u "${KIOSK_UID}" -f "kiosx-(profile|chromium)" >/dev/null 2>&1
+}
+
+is_watchdog_running() {
+    if [[ -f "${WATCHDOG_PID_FILE}" ]]; then
+        local wpid
+        wpid="$(cat "${WATCHDOG_PID_FILE}" 2>/dev/null || true)"
+        if [[ -n "${wpid}" ]] && kill -0 "${wpid}" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    pgrep -u "${KIOSK_UID}" -f "kiosk-watchdog\.sh|openbox/autostart" >/dev/null 2>&1
+}
+
+kill_kiosk_browser() {
+    local killed=0
+    local pat
+    for pat in "kiosx-profile" "kiosx-chromium" "kiosx-touch-test"; do
+        if pkill -TERM -u "${KIOSK_UID}" -f "${pat}" >/dev/null 2>&1; then
+            killed=1
+        fi
+    done
+
+    if (( killed == 1 )); then
+        local i=0
+        while (( i < 20 )); do
+            if ! is_browser_running; then
+                break
+            fi
+            sleep 0.15
+            i=$((i + 1))
+        done
+        for pat in "kiosx-profile" "kiosx-chromium" "kiosx-touch-test"; do
+            pkill -KILL -u "${KIOSK_UID}" -f "${pat}" >/dev/null 2>&1 || true
+        done
+    fi
+    return 0
+}
+
+ensure_watchdog_running() {
+    if is_watchdog_running; then
+        return 0
+    fi
+    if ! is_x11_up; then
+        return 1
+    fi
+    info "Starte Kiosk-Watchdog auf DISPLAY=:0..."
+    run_as_kiosk setsid /bin/sh "${REPO_DIR}/kiosk-watchdog.sh" </dev/null >/dev/null 2>&1 &
+    sleep 1
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Unterbefehle
+# -----------------------------------------------------------------------------
+cmd_start() {
+    # Pause-Flag entfernen
+    run_as_kiosk rm -f "${PAUSE_FLAG}" >/dev/null 2>&1 || rm -f "${PAUSE_FLAG}" 2>/dev/null || true
+
+    # Sicherstellen, dass die Web-UI laeuft
+    if ! systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        info "Starte ${SERVICE_NAME}..."
+        run_systemctl start "${SERVICE_NAME}" || warn "${SERVICE_NAME} konnte nicht gestartet werden."
+    fi
+
+    if ! is_x11_up; then
+        warn "Keine aktive X11-Session auf DISPLAY=:0 gefunden."
+        info "Pause-Flag wurde entfernt. Falls X11 noch nicht laeuft, tty1-Session starten:"
+        info "  sudo systemctl restart getty@tty1.service   (oder: sudo reboot)"
+        return 1
+    fi
+
+    if is_browser_running; then
+        ok "Chromium Kiosk-Browser laeuft bereits."
+        return 0
+    fi
+
+    ensure_watchdog_running || true
+
+    local i=0
+    while (( i < 25 )); do
+        if is_browser_running; then
+            ok "Chromium Kiosk-Browser wurde gestartet."
+            return 0
+        fi
+        sleep 0.25
+        i=$((i + 1))
+    done
+
+    warn "Watchdog ist aktiv, Chromium startet ggf. noch (Log: kiosx logs browser)."
+    return 0
+}
+
+cmd_stop() {
+    # Pause-Flag setzen, damit der Watchdog Chromium nicht sofort wieder startet
+    run_as_kiosk touch "${PAUSE_FLAG}" >/dev/null 2>&1 || touch "${PAUSE_FLAG}"
+    kill_kiosk_browser
+
+    # Hintergrundbild sauber anzeigen, solange der Browser gestoppt ist
+    if is_x11_up && [[ -s "${WALLPAPER_FILE}" ]] && command -v feh >/dev/null 2>&1; then
+        run_as_kiosk feh --no-fehbg --bg-fill "${WALLPAPER_FILE}" >/dev/null 2>&1 || true
+    fi
+
+    ok "Chromium Kiosk-Browser wurde gestoppt (Watchdog pausiert; Web-UI bleibt erreichbar)."
+    info "Zum erneuten Starten: kiosx start"
+}
+
+cmd_restart() {
+    info "Starte Chromium Kiosk-Browser neu..."
+    run_as_kiosk rm -f "${PAUSE_FLAG}" >/dev/null 2>&1 || rm -f "${PAUSE_FLAG}" 2>/dev/null || true
+    kill_kiosk_browser
+
+    if ! is_x11_up; then
+        warn "Browser gestoppt, aber X11 (DISPLAY=:0) ist aktuell nicht erreichbar."
+        return 1
+    fi
+
+    ensure_watchdog_running || true
+
+    local i=0
+    while (( i < 30 )); do
+        if is_browser_running; then
+            ok "Chromium Kiosk-Browser wurde neu gestartet."
+            return 0
+        fi
+        sleep 0.25
+        i=$((i + 1))
+    done
+
+    warn "Neustart ausgeloest – Browser braucht noch einen Moment (Log: kiosx logs browser)."
+}
+
+cmd_apply() {
+    if [[ ! -x "${REPO_DIR}/kiosk-apply.sh" ]]; then
+        err "Skript nicht gefunden: ${REPO_DIR}/kiosk-apply.sh"
+        exit 1
+    fi
+    run_as_kiosk "${REPO_DIR}/kiosk-apply.sh"
+}
+
+cmd_status() {
+    local host_name dev_id url splash_sec
+    host_name="$(hostname)"
+    dev_id="$(jq -r '.device_id // "-"' "${CONFIG_FILE}" 2>/dev/null || echo "-")"
+    url="$(jq -r '.url // "-"' "${CONFIG_FILE}" 2>/dev/null || echo "-")"
+    splash_sec="$(jq -r '.splash_seconds // 15' "${CONFIG_FILE}" 2>/dev/null || echo "15")"
+    local dev_id_lower
+    dev_id_lower="$(printf '%s' "${dev_id}" | tr '[:upper:]' '[:lower:]')"
+
+    local lan_ip ts_ip
+    lan_ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '$2 !~ /^(tailscale|docker|br-|veth|virbr|lxd)/ {split($4,a,"/"); if (a[1] !~ /^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./) {print a[1]; exit}}')"
+    ts_ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '$2 ~ /^tailscale/ {split($4,a,"/"); print a[1]; exit}')"
+
+    local ui_state avahi_state x11_state browser_state watchdog_state audio_state
+    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        ui_state="${C_GREEN}aktiv${C_RESET}"
+    else
+        ui_state="${C_RED}inaktiv${C_RESET}"
+    fi
+
+    if systemctl is-active --quiet avahi-daemon.service 2>/dev/null; then
+        avahi_state="${C_GREEN}aktiv${C_RESET}"
+    else
+        avahi_state="${C_YELLOW}inaktiv${C_RESET}"
+    fi
+
+    local display_info=""
+    if is_x11_up; then
+        x11_state="${C_GREEN}aktiv (DISPLAY=:0)${C_RESET}"
+        display_info="$(run_as_kiosk xrandr --query 2>/dev/null | awk '/ connected/ {out=$1; mode=""; for(i=3;i<=NF;i++){if($i ~ /^[0-9]+x[0-9]+\+/){mode=$i; break}} printf "%s%s ", out, (mode ? " ("mode")" : "")}')"
+    else
+        x11_state="${C_RED}nicht erreichbar${C_RESET}"
+    fi
+
+    if is_browser_running; then
+        browser_state="${C_GREEN}laeuft${C_RESET}"
+    elif [[ -f "${PAUSE_FLAG}" ]]; then
+        browser_state="${C_YELLOW}gestoppt (pausiert)${C_RESET}"
+    else
+        browser_state="${C_RED}gestoppt${C_RESET}"
+    fi
+
+    if is_watchdog_running; then
+        watchdog_state="${C_GREEN}aktiv${C_RESET}"
+    else
+        watchdog_state="${C_YELLOW}nicht aktiv${C_RESET}"
+    fi
+
+    if run_as_kiosk pactl info >/dev/null 2>&1; then
+        local sink vol
+        sink="$(run_as_kiosk pactl get-default-sink 2>/dev/null || echo "-")"
+        vol="$(run_as_kiosk pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null | grep -oE '[0-9]+%' | head -n1 || echo "-")"
+        audio_state="${C_GREEN}aktiv${C_RESET} (${vol}, ${sink})"
+    else
+        audio_state="${C_YELLOW}nicht erreichbar${C_RESET}"
+    fi
+
+    local lan_ui="-"
+    [[ -n "${lan_ip}" ]] && lan_ui="http://${lan_ip}:${KIOSK_PORT}"
+
+    printf '\n%s=== kiosX Status ===%s\n' "${C_BOLD}" "${C_RESET}"
+    printf '  %-16s %s%s%s\n' "Kiosk-ID:" "${C_BOLD}" "${dev_id}" "${C_RESET}"
+    printf '  %-16s %s (User: %s)\n' "Hostname:" "${host_name}" "${KIOSK_USER}"
+    printf '  %-16s %s\n' "LAN Web-UI:" "${lan_ui}"
+    if [[ -n "${ts_ip}" ]]; then
+        printf '  %-16s http://%s:%s\n' "Tailscale UI:" "${ts_ip}" "${KIOSK_PORT}"
+    fi
+    printf '  %-16s http://kiosx-%s.local:%s  (http://%s.local:%s)\n' "mDNS:" "${dev_id_lower}" "${KIOSK_PORT}" "${host_name}" "${KIOSK_PORT}"
+    printf '  %-16s %s (Splash: %ss)\n' "Kiosk-URL:" "${url}" "${splash_sec}"
+    printf '\n'
+    printf '  %-16s %b\n' "Web-UI Service:" "${ui_state}"
+    printf '  %-16s %b\n' "X11 / Openbox:" "${x11_state}"
+    if [[ -n "${display_info}" ]]; then
+        printf '  %-16s %s\n' "Monitor(e):" "${display_info}"
+    fi
+    printf '  %-16s %b (Watchdog: %b)\n' "Browser:" "${browser_state}" "${watchdog_state}"
+    printf '  %-16s %b\n' "PipeWire Audio:" "${audio_state}"
+    printf '  %-16s %b\n' "Avahi (mDNS):" "${avahi_state}"
+    printf '\n'
+}
+
+cmd_id() {
+    local dev_id host_name dev_id_lower lan_ip ts_ip
+    dev_id="$(jq -r '.device_id // "-"' "${CONFIG_FILE}" 2>/dev/null || echo "-")"
+    host_name="$(hostname)"
+    dev_id_lower="$(printf '%s' "${dev_id}" | tr '[:upper:]' '[:lower:]')"
+    lan_ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '$2 !~ /^(tailscale|docker|br-|veth|virbr|lxd)/ {split($4,a,"/"); if (a[1] !~ /^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./) {print a[1]; exit}}')"
+    ts_ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '$2 ~ /^tailscale/ {split($4,a,"/"); print a[1]; exit}')"
+
+    printf 'Kiosk-ID  : %s\n' "${dev_id}"
+    printf 'Hostname  : %s\n' "${host_name}"
+    [[ -n "${lan_ip}" ]] && printf 'LAN       : http://%s:%s\n' "${lan_ip}" "${KIOSK_PORT}"
+    [[ -n "${ts_ip}" ]]  && printf 'Tailscale : http://%s:%s\n' "${ts_ip}" "${KIOSK_PORT}"
+    printf 'mDNS      : http://kiosx-%s.local:%s\n' "${dev_id_lower}" "${KIOSK_PORT}"
+}
+
+cmd_url() {
+    local new_url="${1:-}"
+    if [[ -z "${new_url}" ]]; then
+        jq -r '.url // ""' "${CONFIG_FILE}"
+        return 0
+    fi
+
+    if [[ ! "${new_url}" =~ ^(https?|file):// ]]; then
+        new_url="https://${new_url}"
+    fi
+
+    local tmp_cfg
+    tmp_cfg="$(mktemp "${CONFIG_FILE}.XXXXXX")"
+    jq --arg u "${new_url}" '.url = $u' "${CONFIG_FILE}" > "${tmp_cfg}"
+    chmod 0664 "${tmp_cfg}" 2>/dev/null || true
+    mv "${tmp_cfg}" "${CONFIG_FILE}"
+    ok "Kiosk-URL aktualisiert auf: ${new_url}"
+
+    if is_x11_up && is_browser_running; then
+        cmd_restart
+    fi
+}
+
+cmd_ui() {
+    local sub="${1:-status}"
+    case "${sub}" in
+        start|stop|restart|reload)
+            run_systemctl "${sub}" "${SERVICE_NAME}"
+            ok "${SERVICE_NAME}: ${sub} ausgefuehrt."
+            ;;
+        status)
+            systemctl status "${SERVICE_NAME}" --no-pager
+            ;;
+        *)
+            err "Unbekannte UI-Aktion: ${sub} (erlaubt: start|stop|restart|status)"
+            exit 1
+            ;;
+    esac
+}
+
+cmd_logs() {
+    local target="${1:-ui}"
+    case "${target}" in
+        ui|web|service)
+            journalctl -u "${SERVICE_NAME}" -n 50 -f
+            ;;
+        browser|chromium|chrome)
+            if [[ -f /tmp/kiosx-chromium.log ]]; then
+                tail -n 50 -f /tmp/kiosx-chromium.log
+            else
+                warn "Noch kein Browser-Log vorhanden (/tmp/kiosx-chromium.log)."
+            fi
+            ;;
+        apply)
+            if [[ -f /tmp/kiosx-apply.log ]]; then
+                cat /tmp/kiosx-apply.log
+            else
+                warn "Noch kein Apply-Log vorhanden (/tmp/kiosx-apply.log)."
+            fi
+            ;;
+        *)
+            err "Unbekanntes Log-Ziel: ${target} (erlaubt: ui|browser|apply)"
+            exit 1
+            ;;
+    esac
+}
+
+cmd_update() {
+    info "Aktualisiere Repository unter ${REPO_DIR}..."
+    if [[ "$(id -un)" == "${KIOSK_USER}" ]]; then
+        git -C "${REPO_DIR}" pull --ff-only
+    else
+        run_as_kiosk git -C "${REPO_DIR}" pull --ff-only
+    fi
+    info "Fuehre install.sh aus..."
+    if [[ "${EUID}" -eq 0 ]]; then
+        bash "${REPO_DIR}/install.sh" "$@"
+    else
+        sudo bash "${REPO_DIR}/install.sh" "$@"
+    fi
+}
+
+usage() {
+    cat <<EOF
+${C_BOLD}kiosx${C_RESET} - Steuerung fuer den kiosX Kiosk-Modus (SSH-kompatibel)
+
+${C_BOLD}Verwendung:${C_RESET}
+  kiosx <befehl> [argumente]
+
+${C_BOLD}Befehle:${C_RESET}
+  status                  Zeigt Kiosk-ID, IPs, Display, Browser, Audio & Dienste
+  start                   Startet den Chromium Kiosk-Browser (und Web-UI bei Bedarf)
+  stop                    Stoppt den Browser sauber (Hintergrundbild bleibt sichtbar)
+  restart                 Startet den Chromium Kiosk-Browser neu (inkl. Start-Anzeige)
+  apply                   Wendet /etc/kiosk/config.json sofort live an (xrandr/xinput/pactl)
+  url [neue-url]          Zeigt aktuelle Kiosk-URL oder setzt eine neue inkl. Neustart
+  id                      Zeigt 4-stellige Kiosk-ID und Verbindungs-URLs
+  ui <start|stop|restart|status>
+                          Steuert den Web-UI systemd-Dienst (${SERVICE_NAME})
+  logs [ui|browser|apply] Zeigt Logs von Web-UI, Chromium oder kiosk-apply.sh
+  update [--skip-netplan] Holt Updates per git pull und fuehrt install.sh aus
+  help                    Zeigt diese Hilfe an
+EOF
+}
+
+COMMAND="${1:-status}"
+shift || true
+
+case "${COMMAND}" in
+    status)              cmd_status ;;
+    start)               cmd_start ;;
+    stop)                cmd_stop ;;
+    restart|reload)      cmd_restart ;;
+    apply)               cmd_apply ;;
+    url)                 cmd_url "${1:-}" ;;
+    id)                  cmd_id ;;
+    ui)                  cmd_ui "${1:-status}" ;;
+    logs|log)            cmd_logs "${1:-ui}" ;;
+    update)              cmd_update "$@" ;;
+    -h|--help|help)      usage ;;
+    *)
+        err "Unbekannter Befehl: ${COMMAND}"
+        echo ""
+        usage
+        exit 1
+        ;;
+esac

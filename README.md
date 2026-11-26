@@ -17,6 +17,8 @@ Schlankes, produktionsreifes Kiosk-Setup- und Konfigurations-Tool fuer Mini-PCs 
 ```text
 /opt/kiosX/
 ├── install.sh                 # Idempotentes Installations-Skript fuer Ubuntu Server
+├── kiosx                      # CLI-Tool (verlinkt als /usr/local/bin/kiosx, SSH-faehig)
+├── kiosk-watchdog.sh          # Chromium-Watchdog-Schleife (unterstuetzt kiosx stop/start)
 ├── kiosk-apply.sh             # Live-Applier fuer xrandr, feh, xinput & pactl
 ├── app.py                     # Flask-Backend, Hardware-Erkennung, /splash, /qr.svg & /api/info
 ├── wifi.conf                  # Standard-WLAN-Netzwerke (SSID=PASSWORT) fuer Netplan
@@ -82,20 +84,32 @@ Ueber das Web-UI koennen live konfiguriert werden:
 - `GET /api/info` liefert `{ device_id, hostname, lan_ip, tailscale_ip, mdns_alias, config_url, tailscale_url, target_url, splash_seconds }` als JSON.
 - `GET /qr.svg` erzeugt lokal einen SVG-QR-Code zur aktuellen Config-UI.
 
+## Steuerung per CLI (auch ueber SSH)
+
+Nach der Installation steht global der Befehl `kiosx` (`/usr/local/bin/kiosx`) zur Verfuegung – funktioniert direkt ueber SSH ohne manuelles Setzen von `DISPLAY` oder `XAUTHORITY`:
+
+```bash
+kiosx status                   # Uebersicht: Kiosk-ID, IPs, Display, Browser, Audio & Dienste
+kiosx start                    # Startet Chromium Kiosk-Browser (und Web-UI bei Bedarf)
+kiosx stop                     # Stoppt den Browser sauber (Watchdog pausiert, Wallpaper sichtbar)
+kiosx restart                  # Startet den Browser neu (inkl. Start-Anzeige)
+kiosx apply                    # Wendet /etc/kiosk/config.json sofort live an
+kiosx url                      # Aktuelle Kiosk-URL anzeigen
+kiosx url https://example.com  # Neue Kiosk-URL setzen und Browser neu starten
+kiosx id                       # 4-stellige Kiosk-ID & Verbindungs-URLs anzeigen
+kiosx ui restart               # Web-UI Dienst (kiosk-ui.service) neu starten
+kiosx logs ui                  # Live-Logs der Web-UI (alternativ: browser | apply)
+kiosx update                   # git pull && sudo bash install.sh
+```
+
 ## Wartung & Fehlersuche
 
 ```bash
-# Status & Logs der Web-UI pruefen
-systemctl status kiosk-ui.service
-journalctl -u kiosk-ui.service -f
-
-# Gespeicherte Konfiguration manuell anwenden (als Kiosk-Benutzer)
-DISPLAY=:0 /opt/kiosX/kiosk-apply.sh
+# Status & Logs pruefen
+kiosx status
+kiosx logs ui
 
 # Aktuelle Konfiguration & Netplan-Backups anzeigen
 cat /etc/kiosk/config.json
 ls -la /etc/kiosk/netplan-backup-*
-
-# Updates ausrollen
-cd /opt/kiosX && git pull && sudo bash install.sh
 ```

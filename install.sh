@@ -230,11 +230,13 @@ for sock in pipewire.socket pipewire-pulse.socket; do
 done
 chown -R "${KIOSK_USER}:${KIOSK_USER}" "${KIOSK_HOME}/.config"
 
-# 5. Skript-Berechtigungen im Repository setzen
-chmod 0755 "${REPO_DIR}/install.sh" "${REPO_DIR}/kiosk-apply.sh"
+# 5. Skript-Berechtigungen & globalen CLI-Befehl 'kiosx' einrichten
+chmod 0755 "${REPO_DIR}/install.sh" "${REPO_DIR}/kiosk-apply.sh" "${REPO_DIR}/kiosk-watchdog.sh" "${REPO_DIR}/kiosx"
 if [[ -f "${REPO_DIR}/app.py" ]]; then
     chmod 0644 "${REPO_DIR}/app.py"
 fi
+ln -sfn "${REPO_DIR}/kiosx" /usr/local/bin/kiosx
+ok "CLI-Befehl 'kiosx' unter /usr/local/bin/kiosx verknuepft."
 
 # 6. Persistente Konfiguration (/etc/kiosk/config.json) & 4-stellige Kiosk-ID
 log "Richte Konfigurationsverzeichnis ${CONFIG_DIR} ein..."
@@ -574,102 +576,11 @@ unclutter -idle 2 -root >/dev/null 2>&1 &
 # Gespeicherte Hardware-Konfiguration (Display, Touch, Audio, Wallpaper) anwenden
 "${REPO_DIR}/kiosk-apply.sh" >/tmp/kiosx-apply.log 2>&1 || true
 
-# Chromium im Kiosk-Modus mit Watchdog-Endlosschleife starten
-(
-    resolve_chromium() {
-        for bin in chromium /snap/bin/chromium chromium-browser; do
-            if command -v "\${bin}" >/dev/null 2>&1; then
-                command -v "\${bin}"
-                return 0
-            elif [ -x "\${bin}" ]; then
-                printf '%s\n' "\${bin}"
-                return 0
-            fi
-        done
-        return 1
-    }
-
-    is_snap_chromium() {
-        bin="\$1"
-        real_bin="\$(readlink -f "\${bin}" 2>/dev/null || printf '%s' "\${bin}")"
-        case "\${bin}:\${real_bin}" in
-            *"/snap/"*|*"/bin/snap"*) return 0 ;;
-        esac
-        if [ -f "\${bin}" ] && grep -qs "snap" "\${bin}" 2>/dev/null; then
-            return 0
-        fi
-        return 1
-    }
-
-    while true; do
-        CHROME_BIN="\$(resolve_chromium || true)"
-        if [ -z "\${CHROME_BIN}" ]; then
-            sleep 5
-            continue
-        fi
-
-        # Hintergrundbild vor jedem Browser-Start sicherstellen
-        if [ -f "${WALLPAPER_FILE}" ] && command -v feh >/dev/null 2>&1; then
-            feh --no-fehbg --bg-fill "${WALLPAPER_FILE}" >/dev/null 2>&1 || true
-        fi
-
-        KIOSK_URL="\$(jq -r '.url // "https://example.com"' "${CONFIG_FILE}" 2>/dev/null || printf '%s' "https://example.com")"
-        if [ -z "\${KIOSK_URL}" ] || [ "\${KIOSK_URL}" = "null" ]; then
-            KIOSK_URL="https://example.com"
-        fi
-
-        SPLASH_SEC="\$(jq -r '.splash_seconds // 15' "${CONFIG_FILE}" 2>/dev/null || printf '%s' "15")"
-        LAUNCH_URL="\${KIOSK_URL}"
-
-        # Bei aktivierter Start-Anzeige (/splash) kurz auf lokalen Flask-Dienst pruefen
-        if [ "\${SPLASH_SEC}" != "0" ]; then
-            i=0
-            while [ "\${i}" -lt 6 ]; do
-                if curl -fsS --max-time 1 "http://127.0.0.1:${KIOSK_PORT}/api/info" >/dev/null 2>&1; then
-                    LAUNCH_URL="http://127.0.0.1:${KIOSK_PORT}/splash"
-                    break
-                fi
-                i=\$((i + 1))
-                sleep 0.5
-            done
-        fi
-
-        # Profil-Pfad kompatibel zu apt- und Snap-Chromium waehlen
-        if is_snap_chromium "\${CHROME_BIN}"; then
-            PROFILE_DIR="\$HOME/snap/chromium/common/kiosx-profile"
-        else
-            PROFILE_DIR="\$HOME/.config/kiosx-chromium"
-        fi
-        mkdir -p "\${PROFILE_DIR}/Default"
-
-        # Absturz-Dialoge ("Seiten wiederherstellen") verhindern
-        PREFS_FILE="\${PROFILE_DIR}/Default/Preferences"
-        if [ -f "\${PREFS_FILE}" ]; then
-            sed -i 's/"exited_cleanly":false/"exited_cleanly":true/g; s/"exit_type":"Crashed"/"exit_type":"Normal"/g' "\${PREFS_FILE}" 2>/dev/null || true
-        fi
-
-        "\${CHROME_BIN}" \\
-            --kiosk \\
-            --user-data-dir="\${PROFILE_DIR}" \\
-            --noerrdialogs \\
-            --disable-infobars \\
-            --disable-session-crashed-bubble \\
-            --no-first-run \\
-            --overscroll-history-navigation=0 \\
-            --disable-pinch \\
-            --disable-translate \\
-            --disable-features=Translate,TranslateUI \\
-            --autoplay-policy=no-user-gesture-required \\
-            --check-for-update-interval=31536000 \\
-            --disable-component-update \\
-            --password-store=basic \\
-            --start-fullscreen \\
-            --start-maximized \\
-            "\${LAUNCH_URL}" >/tmp/kiosx-chromium.log 2>&1 || true
-
-        sleep 2
-    done
-) &
+# Chromium im Kiosk-Modus ueber Watchdog-Skript starten (unterstuetzt 'kiosx stop/start')
+KIOSX_CONFIG="${CONFIG_FILE}" \
+KIOSX_WALLPAPER="${WALLPAPER_FILE}" \
+KIOSX_PORT="${KIOSK_PORT}" \
+"${REPO_DIR}/kiosk-watchdog.sh" &
 EOF
 
 chown -R "${KIOSK_USER}:${KIOSK_USER}" "${OPENBOX_DIR}"
