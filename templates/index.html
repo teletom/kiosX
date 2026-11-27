@@ -450,9 +450,19 @@
           <span class="dot {{ 'ok' if hardware.audio.available else 'warn' }}"></span>
           Audio: {{ hardware.audio.cards|length }} Karte(n)
         </span>
+        <button type="button" id="btn-identify" class="outline" style="padding: 0.3rem 0.75rem; font-size: 0.82rem; margin: 0;" title="Kiosk-ID &amp; Infos fuer 10s am Display einblenden (ohne Browser-Neustart)">
+          ID am Display
+        </button>
         <button type="button" id="btn-refresh-hw" class="outline secondary" style="padding: 0.3rem 0.75rem; font-size: 0.82rem; margin: 0;">
           Hardware neu einlesen
         </button>
+        {% if lan_session_active %}
+        <form method="post" action="/logout" style="margin: 0; display: inline;">
+          <button type="submit" class="outline secondary" style="padding: 0.3rem 0.7rem; font-size: 0.82rem; margin: 0;">
+            Abmelden
+          </button>
+        </form>
+        {% endif %}
       </div>
     </div>
 
@@ -536,6 +546,25 @@
               placeholder="https://images.unsplash.com/photo-1493606278519-11aa9f86e40a?auto=format&fit=crop&w=1920&q=85"
             >
           </label>
+
+          <div class="grid">
+            <label style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.25rem;">
+              <input type="checkbox" id="gesture-enabled" role="switch" {{ 'checked' if config.gesture_enabled }}>
+              <span><strong>Z-Touch-Geste aktiv</strong> (OL &rarr; OR &rarr; UL &rarr; UR zeigt Info-Overlay)</span>
+            </label>
+
+            <label for="lan-pin">
+              LAN/WLAN Zugangscode (Tailscale ohne Code)
+              <input
+                type="password"
+                id="lan-pin"
+                name="lan_pin"
+                value=""
+                placeholder="Unveraendert (Standard: 050477)"
+                autocomplete="new-password"
+              >
+            </label>
+          </div>
 
           <div class="row-actions">
             <button type="button" id="btn-restart-browser" class="secondary outline">
@@ -1453,6 +1482,10 @@
         url: $("kiosk-url").value.trim(),
         splash_seconds: parseInt($("splash-seconds").value, 10) || 0,
         wallpaper_url: $("wallpaper-url").value.trim(),
+        gesture_enabled: $("gesture-enabled").checked,
+        auth: {
+          lan_pin: $("lan-pin").value.trim(),
+        },
         display: {
           primary_output: $("primary-output").value,
           resolution: $("display-resolution").value,
@@ -1504,6 +1537,7 @@
             if (data.info.mdns_url) $("info-mdns").textContent = data.info.mdns_url;
             if (data.info.schedule_status) updateScheduleStatusUI(data.info.schedule_status);
           }
+          $("lan-pin").value = "";
           refreshSectionSummaries();
           const warnText = (data.warnings || []).join("\n");
           showToast(data.message || "Gespeichert.", warnText ? "warning" : "success", warnText);
@@ -1570,6 +1604,25 @@
         }
       } catch (err) {
         showToast(`Fehler beim Browser-Neustart: ${err.message}`, "error");
+      } finally {
+        setBusy(btn, false);
+      }
+    });
+
+    // ID & Kiosk-Infos fuer 10s am Display einblenden (ohne Browser-Neustart)
+    $("btn-identify").addEventListener("click", async () => {
+      const btn = $("btn-identify");
+      setBusy(btn, true, "Zeige an...");
+      try {
+        const res = await fetch("/api/identify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "start", seconds: 10 }),
+        });
+        const data = await res.json();
+        showToast(data.message || "Info-Overlay ausgeloest.", res.ok && data.ok ? "success" : "error");
+      } catch (err) {
+        showToast(`Fehler beim Einblenden: ${err.message}`, "error");
       } finally {
         setBusy(btn, false);
       }

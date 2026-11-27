@@ -8,6 +8,7 @@ from __future__ import annotations
 import atexit
 import copy
 from datetime import datetime, timedelta
+import hmac
 import ipaddress
 import json
 import math
@@ -19,6 +20,7 @@ import signal
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -29,7 +31,17 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from flask import Flask, Response, jsonify, render_template, request, send_file
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    session,
+    url_for,
+)
 
 app = Flask(__name__)
 
@@ -38,11 +50,46 @@ VERSION_FILE = REPO_DIR / "VERSION"
 CONFIG_PATH = Path(os.environ.get("KIOSX_CONFIG", "/etc/kiosk/config.json"))
 WALLPAPER_PATH = Path(os.environ.get("KIOSX_WALLPAPER", "/etc/kiosk/wallpaper.jpg"))
 APPLY_SCRIPT = Path(os.environ.get("KIOSX_APPLY_SCRIPT", "/opt/kiosX/kiosk-apply.sh"))
+OVERLAY_SCRIPT = REPO_DIR / "kiosk-overlay.py"
+SECRET_KEY_PATH = CONFIG_PATH.parent / ".flask_secret"
 LISTEN_HOST = os.environ.get("KIOSX_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("KIOSX_PORT", "8080"))
 SERVICE_NAME = "kiosk-ui.service"
 
+DEFAULT_LAN_PIN = "050477"
+TAILSCALE_V4 = ipaddress.ip_network("100.64.0.0/10")
+TAILSCALE_V6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
+
 _UPDATE_LOCK = threading.Lock()
+_IDENTIFY_LOCK = threading.Lock()
+_IDENTIFY_TIMER: threading.Timer | None = None
+_LOGIN_LOCK = threading.Lock()
+_LOGIN_FAILS: dict[str, list[float]] = {}
+_LOGIN_LOCKOUT: dict[str, float] = {}
+
+
+def _load_or_create_secret_key() -> str:
+    for candidate in (SECRET_KEY_PATH, Path(tempfile.gettempdir()) / f"kiosx-secret-{os.getuid()}"):
+        try:
+            if candidate.is_file():
+                val = candidate.read_text(encoding="utf-8").strip()
+                if len(val) >= 32:
+                    return val
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            val = secrets.token_hex(32)
+            fd = os.open(str(candidate), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(val + "\n")
+            return val
+        except OSError:
+            continue
+    return secrets.token_hex(32)
+
+
+app.secret_key = _load_or_create_secret_key()
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=8)
 
 DEFAULT_WALLPAPER_URL = (
     "https://images.unsplash.com/photo-1493606278519-11aa9f86e40a"
@@ -118,6 +165,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "url": "https://example.com",
     "splash_seconds": 15,
     "wallpaper_url": DEFAULT_WALLPAPER_URL,
+    "gesture_enabled": True,
+    "auth": {
+        "lan_pin": DEFAULT_LAN_PIN,
+    },
     "display": {
         "primary_output": "",
         "resolution": "auto",
@@ -706,6 +757,15 @@ def merge_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
     if "wallpaper_url" in raw and raw["wallpaper_url"] is not None:
         cfg["wallpaper_url"] = str(raw["wallpaper_url"]).strip()
 
+    if "gesture_enabled" in raw and raw["gesture_enabled"] is not None:
+        cfg["gesture_enabled"] = bool(raw["gesture_enabled"])
+
+    raw_auth = raw.get("auth")
+    if isinstance(raw_auth, dict):
+        pin_val = str(raw_auth.get("lan_pin") or "").strip()
+        if pin_val:
+            cfg["auth"]["lan_pin"] = pin_val
+
     for section in ("display", "touch", "audio"):
         sub = raw.get(section)
         if isinstance(sub, dict):
@@ -907,6 +967,24 @@ def validate_and_normalize_payload(
                     if not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", val):
                         return None, f"Ungueltige Uhrzeit ({DAY_LABELS_DE[day_key]} {field}): '{val}'"
                     d[field] = val
+
+    # Touch-Geste (Z-Muster) & LAN-PIN validieren
+    if "gesture_enabled" in payload:
+        cfg["gesture_enabled"] = bool(payload.get("gesture_enabled"))
+    elif existing_config and "gesture_enabled" in existing_config:
+        cfg["gesture_enabled"] = bool(existing_config["gesture_enabled"])
+
+    raw_auth = payload.get("auth")
+    if isinstance(raw_auth, dict) and "lan_pin" in raw_auth:
+        pin_val = str(raw_auth.get("lan_pin") or "").strip()
+        if pin_val:
+            if len(pin_val) < 4 or len(pin_val) > 32:
+                return None, "Zugangscode muss zwischen 4 und 32 Zeichen lang sein."
+            cfg["auth"]["lan_pin"] = pin_val
+        elif existing_config and isinstance(existing_config.get("auth"), dict):
+            cfg["auth"]["lan_pin"] = str(existing_config["auth"].get("lan_pin") or DEFAULT_LAN_PIN)
+    elif existing_config and isinstance(existing_config.get("auth"), dict):
+        cfg["auth"]["lan_pin"] = str(existing_config["auth"].get("lan_pin") or DEFAULT_LAN_PIN)
 
     return cfg, None
 
@@ -1519,8 +1597,453 @@ def generate_stereo_test_wav(path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# LAN/WLAN PIN-Authentifizierung (Localhost & Tailscale ohne Code)
+# ---------------------------------------------------------------------------
+def is_trusted_client(remote_addr: str | None) -> bool:
+    """Erlaubt direkten Zugriff ohne Code nur von Localhost und Tailscale (echte TCP-IP)."""
+    if not remote_addr:
+        return False
+    addr_clean = remote_addr.split("%", 1)[0].strip()
+    try:
+        ip_obj = ipaddress.ip_address(addr_clean)
+    except ValueError:
+        return False
+    if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped is not None:
+        ip_obj = ip_obj.ipv4_mapped
+    if ip_obj.is_loopback:
+        return True
+    if isinstance(ip_obj, ipaddress.IPv4Address) and ip_obj in TAILSCALE_V4:
+        return True
+    if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj in TAILSCALE_V6:
+        return True
+    return False
+
+
+def _is_rate_limited(client_ip: str) -> int:
+    """Gibt verbleibende Sperrsekunden zurueck (0 = nicht gesperrt)."""
+    now = time.monotonic()
+    with _LOGIN_LOCK:
+        until = _LOGIN_LOCKOUT.get(client_ip, 0.0)
+        if until > now:
+            return int(until - now + 0.99)
+        if until:
+            _LOGIN_LOCKOUT.pop(client_ip, None)
+    return 0
+
+
+def _record_login_failure(client_ip: str) -> int:
+    """Speichert Fehlversuch; ab 5 Fehlversuchen in 5 Min -> 60 s Sperre."""
+    now = time.monotonic()
+    with _LOGIN_LOCK:
+        fails = [t for t in _LOGIN_FAILS.get(client_ip, []) if now - t < 300.0]
+        fails.append(now)
+        _LOGIN_FAILS[client_ip] = fails
+        if len(fails) >= 5:
+            _LOGIN_LOCKOUT[client_ip] = now + 60.0
+            _LOGIN_FAILS[client_ip] = []
+            return 60
+    return 0
+
+
+def _clear_login_failures(client_ip: str) -> None:
+    with _LOGIN_LOCK:
+        _LOGIN_FAILS.pop(client_ip, None)
+        _LOGIN_LOCKOUT.pop(client_ip, None)
+
+
+@app.before_request
+def enforce_lan_pin_auth():
+    if request.endpoint in ("login_view", "logout_view", "static"):
+        return None
+    if is_trusted_client(request.remote_addr):
+        return None
+    if session.get("lan_authed") is True:
+        return None
+    if request.path.startswith("/api/") or request.method != "GET":
+        return jsonify({"ok": False, "auth_required": True, "message": "Anmeldung erforderlich (LAN-Zugangscode)."}), 401
+    return redirect(url_for("login_view", next=request.path))
+
+
+# ---------------------------------------------------------------------------
+# Live-Info-Overlay ("ID am Display anzeigen", Option B + Option A Fallback)
+# ---------------------------------------------------------------------------
+def get_identify_pid_file() -> Path:
+    return get_runtime_dir() / "kiosx-identify.pid"
+
+
+def _has_tkinter() -> bool:
+    try:
+        res = subprocess.run(
+            [sys.executable, "-c", "import tkinter"],
+            capture_output=True,
+            timeout=3,
+            check=False,
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+def _get_overlay_profile_dir(chrome_bin: str) -> Path:
+    real_bin = os.path.realpath(chrome_bin)
+    is_snap = "/snap/" in chrome_bin or "/snap/" in real_bin or real_bin.endswith("/snap")
+    if not is_snap and os.path.isfile(chrome_bin):
+        try:
+            with open(chrome_bin, "rb") as fh:
+                head = fh.read(2048)
+            if head.startswith(b"#!") and b"snap" in head:
+                is_snap = True
+        except OSError:
+            pass
+    if is_snap:
+        profile = Path.home() / "snap" / "chromium" / "common" / "kiosx-overlay"
+    else:
+        profile = get_runtime_dir() / "kiosx-overlay-profile"
+    profile.mkdir(parents=True, exist_ok=True)
+    return profile
+
+
+def stop_identify_overlay() -> bool:
+    """Beendet ein aktuell angezeigtes Info-Overlay sauber."""
+    global _IDENTIFY_TIMER
+    with _IDENTIFY_LOCK:
+        if _IDENTIFY_TIMER is not None:
+            _IDENTIFY_TIMER.cancel()
+            _IDENTIFY_TIMER = None
+
+        pid_file = get_identify_pid_file()
+        stopped = False
+        if pid_file.is_file():
+            try:
+                pid = int(pid_file.read_text(encoding="utf-8").strip())
+                if is_pid_alive(pid):
+                    try:
+                        os.killpg(os.getpgid(pid), signal.SIGTERM)
+                    except OSError:
+                        try:
+                            os.kill(pid, signal.SIGTERM)
+                        except OSError:
+                            pass
+                    for _ in range(10):
+                        if not is_pid_alive(pid):
+                            break
+                        time.sleep(0.08)
+                    if is_pid_alive(pid):
+                        try:
+                            os.killpg(os.getpgid(pid), signal.SIGKILL)
+                        except OSError:
+                            pass
+                    stopped = True
+            except (OSError, ValueError):
+                pass
+            pid_file.unlink(missing_ok=True)
+
+        # Eventuelle Restprozesse der Fallback-Chromium-Instanz bereinigen
+        try:
+            run_cmd(["pkill", "-f", "kiosx-overlay"], timeout=3)
+        except OSError:
+            pass
+        return stopped
+
+
+def start_identify_overlay(seconds: int = 10) -> tuple[bool, str, str]:
+    """Blendet Kiosk-ID & Infos fuer N Sekunden ueber dem laufenden Browser ein (ohne Neustart)."""
+    global _IDENTIFY_TIMER
+    seconds = max(3, min(60, int(seconds)))
+
+    if shutil.which("xset"):
+        check = run_cmd(["xset", "q"], timeout=4)
+        if check.returncode != 0:
+            return False, "Keine aktive X11-Session unter DISPLAY=:0 erreichbar.", "none"
+
+    stop_identify_overlay()
+    info = build_device_info()
+    env = build_runtime_env()
+
+    # Option B (bevorzugt): blitzschnelles natives Tkinter-Popup (< 100 ms)
+    if OVERLAY_SCRIPT.is_file() and _has_tkinter():
+        cmd = [
+            sys.executable,
+            str(OVERLAY_SCRIPT),
+            "--seconds",
+            str(seconds),
+            "--info-json",
+            json.dumps(info, ensure_ascii=False),
+        ]
+        method = "tkinter"
+    else:
+        # Option A (Fallback): isolierte Chromium-Overlay-Instanz auf /splash?mode=overlay
+        chrome_bin = resolve_chromium_binary()
+        if not chrome_bin:
+            return False, "Weder python3-tk noch Chromium verfuegbar.", "none"
+        profile_dir = _get_overlay_profile_dir(chrome_bin)
+        overlay_url = f"http://127.0.0.1:{LISTEN_PORT}/splash?mode=overlay&seconds={seconds}"
+        cmd = [
+            chrome_bin,
+            "--kiosk",
+            f"--user-data-dir={profile_dir}",
+            "--noerrdialogs",
+            "--disable-infobars",
+            "--no-first-run",
+            "--overscroll-history-navigation=0",
+            "--disable-pinch",
+            "--start-fullscreen",
+            "--new-window",
+            overlay_url,
+        ]
+        method = "chromium-fallback"
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return False, f"Overlay konnte nicht gestartet werden: {exc}", method
+
+    with _IDENTIFY_LOCK:
+        get_identify_pid_file().write_text(str(proc.pid), encoding="utf-8")
+        timer = threading.Timer(seconds + 3.0, stop_identify_overlay)
+        timer.daemon = True
+        timer.start()
+        _IDENTIFY_TIMER = timer
+
+    return True, f"Kiosk-Info ({info['device_id']}) wird {seconds} s am Display eingeblendet.", method
+
+
+# ---------------------------------------------------------------------------
+# Globale Touch-Geste ("Z"-Muster: OL -> OR -> UL -> UR) via xinput test-xi2
+# ---------------------------------------------------------------------------
+class ZGestureDetector:
+    """Erkennt Z-Sequenz (TL -> TR -> BL -> BR) sowohl als 4 Ecken-Tipps als auch als Strich."""
+
+    SEQUENCE = ("TL", "TR", "BL", "BR")
+
+    def __init__(
+        self,
+        corner_frac: float = 0.20,
+        max_step_sec: float = 2.5,
+        max_total_sec: float = 6.0,
+        cooldown_sec: float = 5.0,
+    ) -> None:
+        self.corner_frac = corner_frac
+        self.max_step_sec = max_step_sec
+        self.max_total_sec = max_total_sec
+        self.cooldown_sec = cooldown_sec
+        self._step: int = 0
+        self._start_ts: float = 0.0
+        self._last_ts: float = 0.0
+        self._cooldown_until: float = 0.0
+
+    def classify_corner(self, x: float, y: float, width: float, height: float) -> str | None:
+        if width <= 0 or height <= 0:
+            return None
+        nx = x / width
+        ny = y / height
+        f = self.corner_frac
+        left = nx <= f
+        right = nx >= (1.0 - f)
+        top = ny <= f
+        bottom = ny >= (1.0 - f)
+        if top and left:
+            return "TL"
+        if top and right:
+            return "TR"
+        if bottom and left:
+            return "BL"
+        if bottom and right:
+            return "BR"
+        return None
+
+    def feed(self, x: float, y: float, width: float, height: float, now: float | None = None) -> bool:
+        ts = time.monotonic() if now is None else now
+        if ts < self._cooldown_until:
+            return False
+
+        corner = self.classify_corner(x, y, width, height)
+        if corner is None:
+            if self._step > 0 and (ts - self._last_ts > self.max_step_sec or ts - self._start_ts > self.max_total_sec):
+                self._step = 0
+            return False
+
+        # Timeout pruefen
+        if self._step > 0 and (ts - self._last_ts > self.max_step_sec or ts - self._start_ts > self.max_total_sec):
+            self._step = 0
+
+        # Bereits in der aktuellen Ecke (z. B. waehrend Ziehen/Finger bleibt kurz liegen) -> ignorieren
+        if self._step > 0 and corner == self.SEQUENCE[self._step - 1]:
+            self._last_ts = ts
+            return False
+
+        expected = self.SEQUENCE[self._step]
+        if corner == expected:
+            if self._step == 0:
+                self._start_ts = ts
+            self._last_ts = ts
+            self._step += 1
+            if self._step == len(self.SEQUENCE):
+                self._step = 0
+                self._cooldown_until = ts + self.cooldown_sec
+                return True
+            return False
+
+        # Neustart falls wieder bei TL begonnen wird
+        if corner == "TL":
+            self._step = 1
+            self._start_ts = ts
+            self._last_ts = ts
+        else:
+            self._step = 0
+        return False
+
+
+class TouchGestureMonitor:
+    """Hoert passiv per 'xinput test-xi2 --root' auf die globale Z-Geste am Bildschirm."""
+
+    EVENT_RE = re.compile(r"^EVENT type \d+ \((ButtonPress|Motion|TouchBegin|TouchUpdate)\)")
+    ROOT_RE = re.compile(r"^\s+root:\s*([0-9.]+)/([0-9.]+)")
+    SCREEN_RE = re.compile(r"current\s+(\d+)\s*x\s*(\d+)")
+
+    def __init__(self) -> None:
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._proc: subprocess.Popen[str] | None = None
+        self._detector = ZGestureDetector()
+        self._screen_size: tuple[int, int] = (1920, 1080)
+        self._last_size_check: float = 0.0
+
+    def start(self) -> None:
+        if not shutil.which("xinput"):
+            return
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._loop, name="kiosx-gesture", daemon=True)
+        self._thread.start()
+        atexit.register(self.stop)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+            except OSError:
+                pass
+
+    def _refresh_screen_size(self) -> tuple[int, int]:
+        now = time.monotonic()
+        if now - self._last_size_check < 10.0:
+            return self._screen_size
+        self._last_size_check = now
+        if shutil.which("xrandr"):
+            try:
+                res = run_cmd(["xrandr", "--query"], timeout=3)
+                if res.returncode == 0:
+                    m = self.SCREEN_RE.search(res.stdout)
+                    if m:
+                        self._screen_size = (int(m.group(1)), int(m.group(2)))
+            except Exception:
+                pass
+        return self._screen_size
+
+    def _loop(self) -> None:
+        self._stop_event.wait(2.0)
+        while not self._stop_event.is_set():
+            try:
+                self._proc = subprocess.Popen(
+                    ["xinput", "test-xi2", "--root"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    bufsize=1,
+                    env=build_runtime_env(),
+                )
+                in_relevant_event = False
+                assert self._proc.stdout is not None
+                for line in self._proc.stdout:
+                    if self._stop_event.is_set():
+                        break
+                    if line.startswith("EVENT "):
+                        in_relevant_event = bool(self.EVENT_RE.match(line))
+                        continue
+                    if not in_relevant_event:
+                        continue
+                    m_root = self.ROOT_RE.match(line)
+                    if m_root:
+                        in_relevant_event = False
+                        x = float(m_root.group(1))
+                        y = float(m_root.group(2))
+                        w, h = self._refresh_screen_size()
+                        if self._detector.feed(x, y, w, h):
+                            cfg = load_config(ensure_id=False)
+                            if cfg.get("gesture_enabled", True):
+                                start_identify_overlay(seconds=10)
+            except Exception:
+                pass
+            finally:
+                if self._proc is not None:
+                    try:
+                        self._proc.terminate()
+                        self._proc.wait(timeout=2)
+                    except Exception:
+                        pass
+                    self._proc = None
+            self._stop_event.wait(5.0)
+
+
+gesture_monitor = TouchGestureMonitor()
+
+
+# ---------------------------------------------------------------------------
 # Flask-Routen
 # ---------------------------------------------------------------------------
+@app.route("/login", methods=["GET", "POST"])
+def login_view():
+    if is_trusted_client(request.remote_addr) or session.get("lan_authed") is True:
+        return redirect(url_for("index"))
+
+    info = build_device_info()
+    next_url = request.values.get("next", "/")
+    if not next_url.startswith("/") or next_url.startswith("//"):
+        next_url = "/"
+
+    error: str | None = None
+    client_ip = request.remote_addr or "unknown"
+
+    if request.method == "POST":
+        wait_sec = _is_rate_limited(client_ip)
+        if wait_sec > 0:
+            error = f"Zu viele Fehlversuche. Bitte {wait_sec} Sekunden warten."
+            return render_template("login.html", info=info, error=error, next_url=next_url), 429
+
+        entered_pin = (request.form.get("pin") or "").strip()
+        cfg = load_config(ensure_id=False)
+        expected_pin = str((cfg.get("auth") or {}).get("lan_pin") or DEFAULT_LAN_PIN)
+
+        if entered_pin and hmac.compare_digest(entered_pin, expected_pin):
+            _clear_login_failures(client_ip)
+            session.permanent = True
+            session["lan_authed"] = True
+            return redirect(next_url)
+
+        lock_sec = _record_login_failure(client_ip)
+        if lock_sec > 0:
+            error = f"Zu viele Fehlversuche. Zugriff fuer {lock_sec} Sekunden gesperrt."
+            return render_template("login.html", info=info, error=error, next_url=next_url), 429
+        error = "Falscher Zugangscode."
+        return render_template("login.html", info=info, error=error, next_url=next_url), 401
+
+    return render_template("login.html", info=info, error=error, next_url=next_url)
+
+
+@app.route("/logout", methods=["POST"])
+def logout_view():
+    session.clear()
+    return redirect(url_for("login_view"))
+
+
 @app.route("/", methods=["GET"])
 def index():
     config = load_config()
@@ -1530,6 +2053,7 @@ def index():
         config=config,
         hardware=hardware,
         schedule_presets=SCHEDULE_PRESETS,
+        lan_session_active=(not is_trusted_client(request.remote_addr) and bool(session.get("lan_authed"))),
     )
 
 
@@ -2016,9 +2540,33 @@ def api_display_power():
     )
 
 
+@app.route("/api/identify", methods=["POST"])
+def api_identify():
+    """Blendet Kiosk-ID & Infos fuer N Sekunden am Display ein (ohne Browser-Neustart)."""
+    payload = request.get_json(silent=True) or {}
+    action = str(payload.get("action", "start")).strip().lower()
+
+    if action == "stop":
+        stop_identify_overlay()
+        return jsonify({"ok": True, "active": False, "message": "Info-Overlay wurde geschlossen."})
+
+    if action not in ("start", "toggle"):
+        return jsonify({"ok": False, "message": f"Unbekannte Aktion: {action}"}), 400
+
+    try:
+        seconds = int(payload.get("seconds", 10))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "message": "Ungueltige Anzeigedauer."}), 400
+
+    seconds = max(3, min(60, seconds))
+    ok, msg, method = start_identify_overlay(seconds=seconds)
+    return jsonify({"ok": ok, "active": ok, "seconds": seconds, "method": method, "message": msg}), (200 if ok else 500)
+
+
 if __name__ == "__main__":
-    # Kiosk-ID beim Start sicherstellen, mDNS-Alias & Display-Zeitplan starten
+    # Kiosk-ID beim Start sicherstellen, mDNS-Alias, Zeitplan & Z-Touch-Geste starten
     load_config(ensure_id=True)
     mdns_manager.start()
     schedule_manager.start()
+    gesture_monitor.start()
     app.run(host=LISTEN_HOST, port=LISTEN_PORT, debug=False, threaded=True)

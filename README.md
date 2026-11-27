@@ -45,15 +45,17 @@ Systemstart (Ubuntu Server minimized)
 ### Repository (`/opt/kiosX`)
 ```text
 /opt/kiosX/
-├── VERSION                    # Semantische Versionsnummer (aktuell 1.2.0)
+├── VERSION                    # Semantische Versionsnummer (aktuell 1.3.0)
 ├── install.sh                 # Idempotentes Installations- & Update-Skript
 ├── kiosx                      # SSH-faehiges CLI-Tool (verlinkt als /usr/local/bin/kiosx)
 ├── kiosk-watchdog.sh          # Chromium-Watchdog-Schleife (POSIX sh, Pause-Flag-faehig)
+├── kiosk-overlay.py           # Natives X11/Tkinter Info-Overlay (10s, QR-Code, < 100ms)
 ├── kiosk-apply.sh             # Live-Applier fuer xrandr, feh, xinput & pactl
-├── app.py                     # Flask-Backend, Hardware-Parser, /splash, /qr.svg & Updater
+├── app.py                     # Flask-Backend, Hardware-Parser, Zeitplan, Z-Geste, LAN-PIN & Updater
 ├── wifi.conf                  # Standard-WLAN-Netzwerke (SSID=PASSWORT) fuer Netplan
 ├── templates/
-│   ├── index.html             # Web-UI (Pico CSS v2) inkl. Versions- & Update-Bereich
+│   ├── index.html             # Web-UI (Pico CSS v2, einklappbare Bloecke)
+│   ├── login.html             # PIN-Login-Seite fuer LAN/WLAN-Zugriffe
 │   ├── splash.html            # Start-Anzeige mit Kiosk-ID, IP, mDNS, Tailscale & QR-Code
 │   └── touch_test.html        # Vollbild-Touch-Ecken-Test mit Koordinatenanzeige
 ├── .gitignore
@@ -223,6 +225,8 @@ Alle Hardware-Aufrufe laufen mit `LC_ALL=C`, `DISPLAY=:0`, `XAUTHORITY` und `XDG
 | `POST /touch-test` | Oeffnet/schliesst das Touch-Test-Vollbildfenster (`{"action": "toggle"\|"start"\|"stop"}`) |
 | `POST /restart-browser` | Hebt eventuelle `kiosx stop`-Pause auf und beendet Chromium fuer sauberen Watchdog-Neustart |
 | `POST /api/display-power` | Manuelles Ein-/Ausschalten oder Zeitplan-Automatik (`{"action": "on"\|"off"\|"auto", "target": "both"\|"primary"\|"secondary"}`) |
+| `POST /api/identify` | Blendet Kiosk-ID, IPs & QR-Code fuer N Sekunden (Standard 10 s) per Tkinter-Overlay (oder Chromium-Fallback) ein – ohne Browser-Neustart |
+| `GET/POST /login`, `POST /logout` | PIN-Anmeldung (`050477`) fuer LAN/WLAN-Zugriffe (Localhost & Tailscale ohne Code; Brute-Force-Sperre nach 5 Fehlversuchen) |
 | `GET /api/update/check` | Prueft per `git fetch origin` auf neue Versionen/Commits inkl. Changelog |
 | `POST /api/update/apply` | Fuehrt `git pull --ff-only` aus und startet im Hintergrund `kiosk-ui.service` (oder `install.sh --skip-netplan`, falls `install.sh` geaendert wurde) neu |
 
@@ -244,6 +248,7 @@ kiosx display auto              # Zurueck zur Zeitplan-Automatik
 kiosx url                       # Aktuelle Kiosk-URL anzeigen
 kiosx url https://example.com   # Neue Kiosk-URL atomar setzen und Browser neu starten
 kiosx id                        # 4-stellige Kiosk-ID & Verbindungs-URLs anzeigen
+kiosx identify [sekunden]       # Kiosk-ID & Infos fuer 10s am Display einblenden (ohne Neustart)
 kiosx version                   # Installierte kiosX-Version, Git-Commit & Branch anzeigen
 kiosx ui start|stop|restart|status
 kiosx logs ui|browser|apply     # Live-Logs von Web-UI, Chromium oder kiosk-apply.sh
@@ -254,6 +259,8 @@ kiosx update [--skip-netplan]   # git pull --ff-only && sudo bash install.sh
 
 ## 8. Sicherheits- & Berechtigungskonzept
 
+- **LAN/WLAN-PIN-Schutz:** Zugriffe aus dem lokalen LAN/WLAN erfordern den Zugangscode (Standard `050477`, konfigurierbar in `config.json` unter `auth.lan_pin`) inkl. Brute-Force-Sperre (5 Fehlversuche → 60 s Sperre) und signiertem `HttpOnly`-Session-Cookie (8 h). **Tailscale** (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) und **Localhost** werden direkt ueber die echte TCP-Gegenstelle (`remote_addr`) ohne Code zugelassen.
+- **Globale Z-Touch-Geste:** Ein passiver `xinput test-xi2 --root`-Listener erkennt das Z-Muster (`Oben-Links → Oben-Rechts → Unten-Links → Unten-Rechts`, als 4 schnelle Ecken-Tipps oder gezogener Fingerstrich, automatisch kompatibel zu jeder Display-Drehung) und blendet das 10-Sekunden-Info-Overlay ein.
 - **Kein Root im Web-UI:** `kiosk-ui.service` laeuft als unprivilegierter Kiosk-Benutzer.
 - **Eingeschraenkte Update-Rechte:** `/etc/sudoers.d/kiosx-updater` (`0440`, `visudo`-geprueft) erlaubt passwortlos ausschliesslich `systemctl restart kiosk-ui.service` und `bash /opt/kiosX/install.sh --skip-netplan`.
 - **Snap-Confinement:** Profilverzeichnisse fuer Snap-Chromium liegen unter `~/snap/chromium/common/kiosx-profile` bzw. `~/snap/chromium/common/kiosx-touch-test` (nicht in gesperrten Dot-Verzeichnissen).

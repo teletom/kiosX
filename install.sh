@@ -157,6 +157,7 @@ BASE_PACKAGES=(
     alsa-utils
     python3
     python3-flask
+    python3-tk
     qrencode
     jq
     procps
@@ -259,7 +260,7 @@ if command -v timedatectl &>/dev/null; then
 fi
 
 # 5. Skript-Berechtigungen, CLI 'kiosx' & minimale sudoers fuer Web-UI-Updates einrichten
-chmod 0755 "${REPO_DIR}/install.sh" "${REPO_DIR}/kiosk-apply.sh" "${REPO_DIR}/kiosk-watchdog.sh" "${REPO_DIR}/kiosx"
+chmod 0755 "${REPO_DIR}/install.sh" "${REPO_DIR}/kiosk-apply.sh" "${REPO_DIR}/kiosk-watchdog.sh" "${REPO_DIR}/kiosk-overlay.py" "${REPO_DIR}/kiosx"
 if [[ -f "${REPO_DIR}/app.py" ]]; then
     chmod 0644 "${REPO_DIR}/app.py"
 fi
@@ -413,6 +414,10 @@ if [[ ! -f "${CONFIG_FILE}" ]] || ! jq empty "${CONFIG_FILE}" &>/dev/null; then
   "url": "https://example.com",
   "splash_seconds": 15,
   "wallpaper_url": "${DEFAULT_WALLPAPER_URL}",
+  "gesture_enabled": true,
+  "auth": {
+    "lan_pin": "050477"
+  },
   "display": {
     "primary_output": "",
     "resolution": "auto",
@@ -474,6 +479,8 @@ else
         .device_id = (if (.device_id // "") == "" then $id else .device_id end) |
         .splash_seconds = (if has("splash_seconds") then .splash_seconds else 15 end) |
         .wallpaper_url = (if has("wallpaper_url") then .wallpaper_url else $wp end) |
+        .gesture_enabled = (if has("gesture_enabled") then .gesture_enabled else true end) |
+        .auth = (if has("auth") then .auth else {"lan_pin": "050477"} end) |
         .touch.rotation = (if (.touch.rotation // "auto") == "0" then "auto" else (.touch.rotation // "auto") end) |
         .schedule = (if has("schedule") then .schedule else {
           "enabled": false,

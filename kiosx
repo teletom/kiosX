@@ -518,6 +518,31 @@ cmd_display() {
     fi
 }
 
+cmd_identify() {
+    local seconds="${1:-10}"
+    if ! [[ "${seconds}" =~ ^[0-9]+$ ]]; then
+        err "Verwendung: kiosx identify [sekunden] (z. B. kiosx identify 10)"
+        exit 1
+    fi
+
+    if command -v curl >/dev/null 2>&1 && curl -fsS --max-time 2 "http://127.0.0.1:${KIOSK_PORT}/api/info" >/dev/null 2>&1; then
+        local resp
+        resp="$(curl -fsS --max-time 8 -X POST "http://127.0.0.1:${KIOSK_PORT}/api/identify" \
+            -H "Content-Type: application/json" \
+            -d "{\"action\":\"start\",\"seconds\":${seconds}}" 2>&1)" || {
+            err "API-Aufruf fehlgeschlagen: ${resp}"
+            exit 1
+        }
+        local msg
+        msg="$(jq -r '.message // "Info-Overlay angezeigt."' <<< "${resp}" 2>/dev/null || echo "Info-Overlay angezeigt.")"
+        ok "${msg}"
+        return 0
+    fi
+
+    err "Web-UI Dienst (${SERVICE_NAME}) ist nicht erreichbar."
+    exit 1
+}
+
 cmd_version() {
     local version commit branch
     version="$(cat "${REPO_DIR}/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "dev")"
@@ -543,6 +568,7 @@ ${C_BOLD}Befehle:${C_RESET}
                           Schaltet Monitor(e) sofort ein, in Standby oder auf Zeitplan-Automatik
   url [neue-url]          Zeigt aktuelle Kiosk-URL oder setzt eine neue inkl. Neustart
   id                      Zeigt 4-stellige Kiosk-ID und Verbindungs-URLs
+  identify [sekunden]     Blendet Kiosk-ID & Infos am Display ein (Standard: 10s, ohne Neustart)
   version                 Zeigt installierte kiosX-Version und Git-Commit
   ui <start|stop|restart|status>
                           Steuert den Web-UI systemd-Dienst (${SERVICE_NAME})
@@ -564,6 +590,7 @@ case "${COMMAND}" in
     display)             cmd_display "${1:-}" "${2:-both}" ;;
     url)                 cmd_url "${1:-}" ;;
     id)                  cmd_id ;;
+    identify)            cmd_identify "${1:-10}" ;;
     version|-v|--version) cmd_version ;;
     ui)                  cmd_ui "${1:-status}" ;;
     logs|log)            cmd_logs "${1:-ui}" ;;
