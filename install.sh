@@ -249,6 +249,15 @@ for sock in pipewire.socket pipewire-pulse.socket; do
 done
 chown -R "${KIOSK_USER}:${KIOSK_USER}" "${KIOSK_HOME}/.config"
 
+# 4b. Zeitzone pruefen (Ubuntu Server minimized startet oft mit Etc/UTC)
+if command -v timedatectl &>/dev/null; then
+    CUR_TZ="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+    if [[ -z "${CUR_TZ}" || "${CUR_TZ}" == "Etc/UTC" || "${CUR_TZ}" == "UTC" ]]; then
+        log "Setze System-Zeitzone von '${CUR_TZ:-unbekannt}' auf 'Europe/Vienna'..."
+        timedatectl set-timezone Europe/Vienna 2>/dev/null || warn "Zeitzone konnte nicht gesetzt werden."
+    fi
+fi
+
 # 5. Skript-Berechtigungen, CLI 'kiosx' & minimale sudoers fuer Web-UI-Updates einrichten
 chmod 0755 "${REPO_DIR}/install.sh" "${REPO_DIR}/kiosk-apply.sh" "${REPO_DIR}/kiosk-watchdog.sh" "${REPO_DIR}/kiosx"
 if [[ -f "${REPO_DIR}/app.py" ]]; then
@@ -419,6 +428,35 @@ if [[ ! -f "${CONFIG_FILE}" ]] || ! jq empty "${CONFIG_FILE}" &>/dev/null; then
     "card": "",
     "profile": "",
     "volume": 75
+  },
+  "schedule": {
+    "enabled": false,
+    "timezone": "Europe/Vienna",
+    "scope": "both",
+    "primary": {
+      "preset": "inhouse",
+      "days": {
+        "mon": { "enabled": true,  "start": "07:15", "end": "16:45" },
+        "tue": { "enabled": true,  "start": "07:15", "end": "16:45" },
+        "wed": { "enabled": true,  "start": "07:15", "end": "16:45" },
+        "thu": { "enabled": true,  "start": "07:15", "end": "16:45" },
+        "fri": { "enabled": true,  "start": "07:15", "end": "12:15" },
+        "sat": { "enabled": false, "start": "08:00", "end": "18:00" },
+        "sun": { "enabled": false, "start": "08:00", "end": "18:00" }
+      }
+    },
+    "secondary": {
+      "preset": "inhouse",
+      "days": {
+        "mon": { "enabled": true,  "start": "07:15", "end": "16:45" },
+        "tue": { "enabled": true,  "start": "07:15", "end": "16:45" },
+        "wed": { "enabled": true,  "start": "07:15", "end": "16:45" },
+        "thu": { "enabled": true,  "start": "07:15", "end": "16:45" },
+        "fri": { "enabled": true,  "start": "07:15", "end": "12:15" },
+        "sat": { "enabled": false, "start": "08:00", "end": "18:00" },
+        "sun": { "enabled": false, "start": "08:00", "end": "18:00" }
+      }
+    }
   }
 }
 EOF
@@ -436,7 +474,36 @@ else
         .device_id = (if (.device_id // "") == "" then $id else .device_id end) |
         .splash_seconds = (if has("splash_seconds") then .splash_seconds else 15 end) |
         .wallpaper_url = (if has("wallpaper_url") then .wallpaper_url else $wp end) |
-        .touch.rotation = (if (.touch.rotation // "auto") == "0" then "auto" else (.touch.rotation // "auto") end)
+        .touch.rotation = (if (.touch.rotation // "auto") == "0" then "auto" else (.touch.rotation // "auto") end) |
+        .schedule = (if has("schedule") then .schedule else {
+          "enabled": false,
+          "timezone": "Europe/Vienna",
+          "scope": "both",
+          "primary": {
+            "preset": "inhouse",
+            "days": {
+              "mon": {"enabled": true, "start": "07:15", "end": "16:45"},
+              "tue": {"enabled": true, "start": "07:15", "end": "16:45"},
+              "wed": {"enabled": true, "start": "07:15", "end": "16:45"},
+              "thu": {"enabled": true, "start": "07:15", "end": "16:45"},
+              "fri": {"enabled": true, "start": "07:15", "end": "12:15"},
+              "sat": {"enabled": false, "start": "08:00", "end": "18:00"},
+              "sun": {"enabled": false, "start": "08:00", "end": "18:00"}
+            }
+          },
+          "secondary": {
+            "preset": "inhouse",
+            "days": {
+              "mon": {"enabled": true, "start": "07:15", "end": "16:45"},
+              "tue": {"enabled": true, "start": "07:15", "end": "16:45"},
+              "wed": {"enabled": true, "start": "07:15", "end": "16:45"},
+              "thu": {"enabled": true, "start": "07:15", "end": "16:45"},
+              "fri": {"enabled": true, "start": "07:15", "end": "12:15"},
+              "sat": {"enabled": false, "start": "08:00", "end": "18:00"},
+              "sun": {"enabled": false, "start": "08:00", "end": "18:00"}
+            }
+          }
+        } end)
     ' "${CONFIG_FILE}" > "${tmp_cfg}"
     mv "${tmp_cfg}" "${CONFIG_FILE}"
     ok "Bestehende Konfiguration unter ${CONFIG_FILE} aktualisiert/beibehalten (Kiosk-ID: ${EXISTING_ID})."

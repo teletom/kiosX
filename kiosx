@@ -356,7 +356,25 @@ cmd_status() {
     if [[ -n "${display_info}" ]]; then
         printf '  %-16s %s\n' "Monitor(e):" "${display_info}"
     fi
+    local sched_line=""
+    if command -v curl >/dev/null 2>&1; then
+        local api_json
+        api_json="$(curl -fsS --max-time 2 "http://127.0.0.1:${KIOSK_PORT}/api/info" 2>/dev/null || true)"
+        if [[ -n "${api_json}" ]]; then
+            sched_line="$(jq -r '
+                .schedule_status // empty |
+                (if .enabled then "aktiv (" + .primary_preset + ")" else "deaktiviert" end) +
+                " | " + (if .all_off then "Standby" else "Monitor EIN" end) +
+                " | " + .local_day + " " + .local_time + " (" + .timezone + ")" +
+                (if (.next_change_primary // "") != "" then " | " + .next_change_primary else "" end)
+            ' <<< "${api_json}" 2>/dev/null || true)"
+        fi
+    fi
+
     printf '  %-16s %b (Watchdog: %b)\n' "Browser:" "${browser_state}" "${watchdog_state}"
+    if [[ -n "${sched_line}" ]]; then
+        printf '  %-16s %s\n' "Zeitplan:" "${sched_line}"
+    fi
     printf '  %-16s %b\n' "PipeWire Audio:" "${audio_state}"
     printf '  %-16s %b\n' "Avahi (mDNS):" "${avahi_state}"
     printf '\n'
@@ -459,6 +477,47 @@ cmd_update() {
     fi
 }
 
+cmd_display() {
+    local action="${1:-}"
+    local target="${2:-both}"
+    case "${action}" in
+        on|off|auto) ;;
+        *)
+            err "Verwendung: kiosx display <on|off|auto> [both|primary|secondary]"
+            exit 1
+            ;;
+    esac
+
+    if command -v curl >/dev/null 2>&1 && curl -fsS --max-time 2 "http://127.0.0.1:${KIOSK_PORT}/api/info" >/dev/null 2>&1; then
+        local resp
+        resp="$(curl -fsS --max-time 15 -X POST "http://127.0.0.1:${KIOSK_PORT}/api/display-power" \
+            -H "Content-Type: application/json" \
+            -d "{\"action\":\"${action}\",\"target\":\"${target}\"}" 2>&1)" || {
+            err "API-Aufruf fehlgeschlagen: ${resp}"
+            exit 1
+        }
+        local msg
+        msg="$(jq -r '.message // "Ausgefuehrt."' <<< "${resp}" 2>/dev/null || echo "Ausgefuehrt.")"
+        ok "${msg}"
+        return 0
+    fi
+
+    # Direkter Fallback, falls kiosk-ui.service gestoppt ist
+    if [[ "${action}" == "off" ]]; then
+        run_as_kiosk xset +dpms
+        run_as_kiosk xset dpms 0 0 0
+        run_as_kiosk xset dpms force off
+        run_as_kiosk pactl set-sink-mute @DEFAULT_SINK@ 1 >/dev/null 2>&1 || true
+        ok "Display per xset in Standby versetzt (Fallback ohne Web-UI)."
+    elif [[ "${action}" == "on" || "${action}" == "auto" ]]; then
+        run_as_kiosk xset dpms force on
+        run_as_kiosk xset -dpms
+        sleep 1
+        run_as_kiosk "${REPO_DIR}/kiosk-apply.sh"
+        ok "Display aufgeweckt und Konfiguration angewendet."
+    fi
+}
+
 cmd_version() {
     local version commit branch
     version="$(cat "${REPO_DIR}/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "dev")"
@@ -480,6 +539,8 @@ ${C_BOLD}Befehle:${C_RESET}
   stop                    Stoppt den Browser sauber (Hintergrundbild bleibt sichtbar)
   restart                 Startet den Chromium Kiosk-Browser neu (inkl. Start-Anzeige)
   apply                   Wendet /etc/kiosk/config.json sofort live an (xrandr/xinput/pactl)
+  display <on|off|auto> [both|primary|secondary]
+                          Schaltet Monitor(e) sofort ein, in Standby oder auf Zeitplan-Automatik
   url [neue-url]          Zeigt aktuelle Kiosk-URL oder setzt eine neue inkl. Neustart
   id                      Zeigt 4-stellige Kiosk-ID und Verbindungs-URLs
   version                 Zeigt installierte kiosX-Version und Git-Commit
@@ -500,6 +561,7 @@ case "${COMMAND}" in
     stop)                cmd_stop ;;
     restart|reload)      cmd_restart ;;
     apply)               cmd_apply ;;
+    display)             cmd_display "${1:-}" "${2:-both}" ;;
     url)                 cmd_url "${1:-}" ;;
     id)                  cmd_id ;;
     version|-v|--version) cmd_version ;;

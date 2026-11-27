@@ -10,6 +10,9 @@ set -u
 
 CONFIG_FILE="${KIOSX_CONFIG:-/etc/kiosk/config.json}"
 WALLPAPER_FILE="${KIOSX_WALLPAPER:-/etc/kiosk/wallpaper.jpg}"
+FORCE_OFF_PRIMARY="${KIOSX_FORCE_OFF_PRIMARY:-0}"
+FORCE_OFF_SECONDARY="${KIOSX_FORCE_OFF_SECONDARY:-0}"
+FORCE_MUTE="${KIOSX_FORCE_MUTE:-0}"
 export LC_ALL=C
 export DISPLAY="${DISPLAY:-:0}"
 export XAUTHORITY="${XAUTHORITY:-${HOME}/.Xauthority}"
@@ -141,40 +144,49 @@ if (( X11_AVAILABLE == 1 )); then
             ACTIVE_PRIMARY="${CONNECTED_OUTPUTS[0]}"
         fi
 
-        XRANDR_ARGS=(--output "${ACTIVE_PRIMARY}" --primary)
-        if [[ -z "${RESOLUTION}" || "${RESOLUTION}" == "auto" ]]; then
-            XRANDR_ARGS+=(--auto)
-        elif mode_supported "${ACTIVE_PRIMARY}" "${RESOLUTION}"; then
-            XRANDR_ARGS+=(--mode "${RESOLUTION}")
+        XRANDR_ARGS=()
+        if [[ "${FORCE_OFF_PRIMARY}" == "1" ]]; then
+            XRANDR_ARGS+=(--output "${ACTIVE_PRIMARY}" --off)
         else
-            warn "Aufloesung '${RESOLUTION}' fuer '${ACTIVE_PRIMARY}' nicht verfuegbar – verwende 'auto'."
-            XRANDR_ARGS+=(--auto)
+            XRANDR_ARGS+=(--output "${ACTIVE_PRIMARY}" --primary)
+            if [[ -z "${RESOLUTION}" || "${RESOLUTION}" == "auto" ]]; then
+                XRANDR_ARGS+=(--auto)
+            elif mode_supported "${ACTIVE_PRIMARY}" "${RESOLUTION}"; then
+                XRANDR_ARGS+=(--mode "${RESOLUTION}")
+            else
+                warn "Aufloesung '${RESOLUTION}' fuer '${ACTIVE_PRIMARY}' nicht verfuegbar – verwende 'auto'."
+                XRANDR_ARGS+=(--auto)
+            fi
+            XRANDR_ARGS+=(--rotate "${ROTATION}")
         fi
-        XRANDR_ARGS+=(--rotate "${ROTATION}")
 
         # Optionales zweites Display konfigurieren
         ACTIVE_SECONDARY=""
         if [[ -n "${SECONDARY_OUTPUT}" && "${SECONDARY_OUTPUT}" != "${ACTIVE_PRIMARY}" ]]; then
             if is_connected "${SECONDARY_OUTPUT}"; then
                 ACTIVE_SECONDARY="${SECONDARY_OUTPUT}"
-                case "${SECONDARY_MODE}" in
-                    off)
-                        XRANDR_ARGS+=(--output "${ACTIVE_SECONDARY}" --off)
-                        ;;
-                    right)
-                        XRANDR_ARGS+=(--output "${ACTIVE_SECONDARY}" --auto --rotate normal --right-of "${ACTIVE_PRIMARY}")
-                        ;;
-                    left)
-                        XRANDR_ARGS+=(--output "${ACTIVE_SECONDARY}" --auto --rotate normal --left-of "${ACTIVE_PRIMARY}")
-                        ;;
-                    mirror)
-                        XRANDR_ARGS+=(--output "${ACTIVE_SECONDARY}" --auto --rotate "${ROTATION}" --same-as "${ACTIVE_PRIMARY}")
-                        ;;
-                esac
+                if [[ "${FORCE_OFF_SECONDARY}" == "1" || "${SECONDARY_MODE}" == "off" ]]; then
+                    XRANDR_ARGS+=(--output "${ACTIVE_SECONDARY}" --off)
+                elif [[ "${FORCE_OFF_PRIMARY}" == "1" ]]; then
+                    # Primaer-Display ist per Zeitplan aus -> Sekundaer-Display eigenstaendig aktiv halten
+                    XRANDR_ARGS+=(--output "${ACTIVE_SECONDARY}" --auto --rotate normal)
+                else
+                    case "${SECONDARY_MODE}" in
+                        right)
+                            XRANDR_ARGS+=(--output "${ACTIVE_SECONDARY}" --auto --rotate normal --right-of "${ACTIVE_PRIMARY}")
+                            ;;
+                        left)
+                            XRANDR_ARGS+=(--output "${ACTIVE_SECONDARY}" --auto --rotate normal --left-of "${ACTIVE_PRIMARY}")
+                            ;;
+                        mirror)
+                            XRANDR_ARGS+=(--output "${ACTIVE_SECONDARY}" --auto --rotate "${ROTATION}" --same-as "${ACTIVE_PRIMARY}")
+                            ;;
+                    esac
+                fi
             else
                 warn "Konfiguriertes Zweit-Display '${SECONDARY_OUTPUT}' nicht verbunden."
             fi
-        elif [[ "${SECONDARY_MODE}" == "off" ]]; then
+        elif [[ "${SECONDARY_MODE}" == "off" || "${FORCE_OFF_SECONDARY}" == "1" ]]; then
             for out in "${CONNECTED_OUTPUTS[@]}"; do
                 if [[ "${out}" != "${ACTIVE_PRIMARY}" ]]; then
                     XRANDR_ARGS+=(--output "${out}" --off)
@@ -235,6 +247,16 @@ if (( X11_AVAILABLE == 1 )) && [[ -n "${TOUCH_DEVICE}" ]]; then
             warn "Touch-Geraet '${TOUCH_DEVICE}' nicht gefunden – uebersprungen."
         else
             for dev_id in "${TOUCH_IDS[@]}"; do
+                # Falls Primaer-Display im Zeitplan-Standby ist, Touch deaktivieren
+                if [[ "${FORCE_OFF_PRIMARY}" == "1" ]]; then
+                    log "Deaktiviere Touch-Geraet ID=${dev_id} waehrend Standby..."
+                    xinput disable "${dev_id}" >/dev/null 2>&1 || warn "xinput disable fuer ID=${dev_id} fehlgeschlagen."
+                    continue
+                fi
+
+                # 0) Sicherstellen, dass Touch nach Standby wieder aktiviert ist
+                xinput enable "${dev_id}" >/dev/null 2>&1 || true
+
                 # 1) Touch-Geraet an Primaer-Monitor binden
                 #    Hinweis: xinput map-to-output uebernimmt die aktuelle xrandr-Drehung automatisch!
                 if [[ -n "${ACTIVE_PRIMARY}" ]]; then
@@ -330,12 +352,17 @@ else
         fi
     fi
 
-    log "Setze Lautstaerke auf ${AUDIO_VOLUME}% und hebe Stummschaltung auf (${TARGET_SINK})..."
-    if ! pactl set-sink-mute "${TARGET_SINK}" 0 2>&1; then
-        warn "Stummschaltung fuer '${TARGET_SINK}' konnte nicht aufgehoben werden."
-    fi
-    if ! pactl set-sink-volume "${TARGET_SINK}" "${AUDIO_VOLUME}%" 2>&1; then
-        warn "Lautstaerke fuer '${TARGET_SINK}' konnte nicht auf ${AUDIO_VOLUME}% gesetzt werden."
+    if [[ "${FORCE_MUTE}" == "1" ]]; then
+        log "Stummschaltung aktiv (Standby-Modus) fuer ${TARGET_SINK}..."
+        pactl set-sink-mute "${TARGET_SINK}" 1 >/dev/null 2>&1 || true
+    else
+        log "Setze Lautstaerke auf ${AUDIO_VOLUME}% und hebe Stummschaltung auf (${TARGET_SINK})..."
+        if ! pactl set-sink-mute "${TARGET_SINK}" 0 2>&1; then
+            warn "Stummschaltung fuer '${TARGET_SINK}' konnte nicht aufgehoben werden."
+        fi
+        if ! pactl set-sink-volume "${TARGET_SINK}" "${AUDIO_VOLUME}%" 2>&1; then
+            warn "Lautstaerke fuer '${TARGET_SINK}' konnte nicht auf ${AUDIO_VOLUME}% gesetzt werden."
+        fi
     fi
 fi
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import atexit
 import copy
+from datetime import datetime, timedelta
 import ipaddress
 import json
 import math
@@ -26,6 +27,7 @@ import urllib.request
 import wave
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Flask, Response, jsonify, render_template, request, send_file
 
@@ -53,6 +55,57 @@ MAX_WALLPAPER_BYTES = 15 * 1024 * 1024  # 15 MB
 VALID_DISPLAY_ROTATIONS = ("normal", "right", "inverted", "left")
 VALID_SECONDARY_MODES = ("off", "right", "left", "mirror")
 VALID_TOUCH_ROTATIONS = ("auto", "90", "180", "270")
+VALID_SCHEDULE_SCOPES = ("both", "separate")
+VALID_SCHEDULE_PRESETS = ("inhouse", "messe", "custom")
+DAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+DAY_LABELS_DE = {
+    "mon": "Mo",
+    "tue": "Di",
+    "wed": "Mi",
+    "thu": "Do",
+    "fri": "Fr",
+    "sat": "Sa",
+    "sun": "So",
+}
+DEFAULT_TIMEZONE = "Europe/Vienna"
+
+SCHEDULE_PRESETS: dict[str, dict[str, dict[str, Any]]] = {
+    "inhouse": {
+        "mon": {"enabled": True, "start": "07:15", "end": "16:45"},
+        "tue": {"enabled": True, "start": "07:15", "end": "16:45"},
+        "wed": {"enabled": True, "start": "07:15", "end": "16:45"},
+        "thu": {"enabled": True, "start": "07:15", "end": "16:45"},
+        "fri": {"enabled": True, "start": "07:15", "end": "12:15"},
+        "sat": {"enabled": False, "start": "08:00", "end": "18:00"},
+        "sun": {"enabled": False, "start": "08:00", "end": "18:00"},
+    },
+    "messe": {
+        "mon": {"enabled": True, "start": "08:00", "end": "18:00"},
+        "tue": {"enabled": True, "start": "08:00", "end": "18:00"},
+        "wed": {"enabled": True, "start": "08:00", "end": "18:00"},
+        "thu": {"enabled": True, "start": "08:00", "end": "18:00"},
+        "fri": {"enabled": True, "start": "08:00", "end": "18:00"},
+        "sat": {"enabled": True, "start": "08:00", "end": "18:00"},
+        "sun": {"enabled": True, "start": "08:00", "end": "18:00"},
+    },
+}
+
+
+def make_default_schedule() -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "timezone": DEFAULT_TIMEZONE,
+        "scope": "both",
+        "primary": {
+            "preset": "inhouse",
+            "days": copy.deepcopy(SCHEDULE_PRESETS["inhouse"]),
+        },
+        "secondary": {
+            "preset": "inhouse",
+            "days": copy.deepcopy(SCHEDULE_PRESETS["inhouse"]),
+        },
+    }
+
 
 TOUCH_NAME_REGEX = re.compile(
     r"(touch|goodix|elan|egalax|ilitek|wacom|ft54|gt9|elo|3m|sis|atmel|"
@@ -81,6 +134,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "profile": "",
         "volume": 75,
     },
+    "schedule": make_default_schedule(),
 }
 
 
@@ -302,6 +356,334 @@ mdns_manager = MdnsAliasManager()
 
 
 # ---------------------------------------------------------------------------
+# Zeitplan-Steuerung fuer Monitor-Standby (DPMS / xrandr / Touch / Audio)
+# ---------------------------------------------------------------------------
+def _parse_hhmm(hhmm: str) -> int:
+    h, m = hhmm.split(":", 1)
+    return int(h) * 60 + int(m)
+
+
+def _get_tz(tz_name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(tz_name or DEFAULT_TIMEZONE)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
+
+
+def is_schedule_active_at(plan: dict[str, Any], dt: datetime) -> bool:
+    """Prueft, ob das Display laut Zeitplan zum Zeitpunkt dt (timezone-aware) aktiv sein soll."""
+    days = plan.get("days") or {}
+    weekday = dt.weekday()  # 0=mon..6=sun
+    now_min = dt.hour * 60 + dt.minute
+
+    today_cfg = days.get(DAY_KEYS[weekday]) or {}
+    if today_cfg.get("enabled"):
+        s_min = _parse_hhmm(today_cfg.get("start", "07:15"))
+        e_min = _parse_hhmm(today_cfg.get("end", "16:45"))
+        if s_min == e_min:
+            return True
+        if s_min < e_min:
+            if s_min <= now_min < e_min:
+                return True
+        else:
+            # Ueber Mitternacht (z. B. 22:00 bis 06:00)
+            if now_min >= s_min:
+                return True
+
+    # Ueberhang von gestern (falls gestern ein Ueber-Mitternacht-Fenster aktiv war)
+    prev_cfg = days.get(DAY_KEYS[(weekday - 1) % 7]) or {}
+    if prev_cfg.get("enabled"):
+        ps_min = _parse_hhmm(prev_cfg.get("start", "07:15"))
+        pe_min = _parse_hhmm(prev_cfg.get("end", "16:45"))
+        if ps_min > pe_min and now_min < pe_min:
+            return True
+
+    return False
+
+
+def compute_next_change(plan: dict[str, Any], dt: datetime) -> dict[str, str] | None:
+    """Berechnet den naechsten Zustandswechsel (EIN<->AUS) in den kommenden 7 Tagen."""
+    current_active = is_schedule_active_at(plan, dt)
+    days = plan.get("days") or {}
+    tz = dt.tzinfo
+    base_date = dt.date()
+
+    candidates: list[datetime] = []
+    for offset in range(0, 8):
+        d_date = base_date + timedelta(days=offset)
+        day_cfg = days.get(DAY_KEYS[d_date.weekday()]) or {}
+        if not day_cfg.get("enabled"):
+            continue
+        s_min = _parse_hhmm(day_cfg.get("start", "07:15"))
+        e_min = _parse_hhmm(day_cfg.get("end", "16:45"))
+        if s_min == e_min:
+            continue
+        start_dt = datetime(d_date.year, d_date.month, d_date.day, s_min // 60, s_min % 60, tzinfo=tz)
+        if s_min < e_min:
+            end_dt = datetime(d_date.year, d_date.month, d_date.day, e_min // 60, e_min % 60, tzinfo=tz)
+        else:
+            next_date = d_date + timedelta(days=1)
+            end_dt = datetime(next_date.year, next_date.month, next_date.day, e_min // 60, e_min % 60, tzinfo=tz)
+        candidates.extend([start_dt, end_dt])
+
+    # Eventuelles Ende eines Ueber-Mitternacht-Fensters von gestern
+    y_date = base_date - timedelta(days=1)
+    y_cfg = days.get(DAY_KEYS[y_date.weekday()]) or {}
+    if y_cfg.get("enabled"):
+        ys_min = _parse_hhmm(y_cfg.get("start", "07:15"))
+        ye_min = _parse_hhmm(y_cfg.get("end", "16:45"))
+        if ys_min > ye_min:
+            candidates.append(datetime(base_date.year, base_date.month, base_date.day, ye_min // 60, ye_min % 60, tzinfo=tz))
+
+    for cand in sorted(set(candidates)):
+        if cand <= dt:
+            continue
+        next_active = is_schedule_active_at(plan, cand)
+        if next_active != current_active:
+            delta_days = (cand.date() - base_date).days
+            if delta_days == 0:
+                day_str = "Heute"
+            elif delta_days == 1:
+                day_str = "Morgen"
+            else:
+                day_str = DAY_LABELS_DE[DAY_KEYS[cand.weekday()]]
+            return {
+                "action": "on" if next_active else "off",
+                "label": f"{'Aktiv' if next_active else 'Standby'} ab {day_str} {cand.strftime('%H:%M')}",
+                "iso": cand.isoformat(),
+            }
+    return None
+
+
+class DisplayScheduleManager:
+    """Steuert Display-Standby (DPMS/xrandr), Touch-Sperre und Audio-Mute nach Zeitplan."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._wakeup = threading.Event()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._override: dict[str, str | None] = {"primary": None, "secondary": None}
+        self._applied_state: tuple[bool, bool, bool] | None = None  # (primary_on, secondary_on, all_off)
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._loop, name="kiosx-schedule", daemon=True)
+        self._thread.start()
+        atexit.register(self.stop)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._wakeup.set()
+
+    def _has_secondary(self, cfg: dict[str, Any]) -> bool:
+        disp = cfg.get("display") or {}
+        return bool(disp.get("secondary_output")) and disp.get("secondary_mode", "off") != "off"
+
+    def evaluate(self, cfg: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+        sched = cfg.get("schedule") or make_default_schedule()
+        tz = _get_tz(sched.get("timezone", DEFAULT_TIMEZONE))
+        now_dt = now.astimezone(tz) if now is not None else datetime.now(tz)
+        enabled = bool(sched.get("enabled", False))
+        scope = sched.get("scope", "both")
+        has_sec = self._has_secondary(cfg)
+
+        p_plan = sched.get("primary") or {"preset": "inhouse", "days": SCHEDULE_PRESETS["inhouse"]}
+        s_plan = sched.get("secondary") or p_plan
+
+        if enabled:
+            p_sched = is_schedule_active_at(p_plan, now_dt)
+            s_sched = p_sched if scope == "both" else is_schedule_active_at(s_plan, now_dt)
+            p_next = compute_next_change(p_plan, now_dt)
+            s_next = p_next if scope == "both" else compute_next_change(s_plan, now_dt)
+        else:
+            p_sched = True
+            s_sched = True
+            p_next = None
+            s_next = None
+
+        with self._lock:
+            ov_p = self._override["primary"]
+            ov_s = self._override["secondary"]
+
+        p_on = True if ov_p == "on" else (False if ov_p == "off" else p_sched)
+        s_on = True if ov_s == "on" else (False if ov_s == "off" else s_sched)
+        if not has_sec:
+            s_on = False
+
+        all_off = (not p_on) and (not has_sec or not s_on)
+
+        return {
+            "enabled": enabled,
+            "timezone": sched.get("timezone", DEFAULT_TIMEZONE),
+            "local_time": now_dt.strftime("%H:%M"),
+            "local_day": DAY_LABELS_DE[DAY_KEYS[now_dt.weekday()]],
+            "scope": scope,
+            "has_secondary": has_sec,
+            "primary_preset": p_plan.get("preset", "inhouse"),
+            "secondary_preset": s_plan.get("preset", "inhouse"),
+            "primary_state": "on" if p_on else "standby",
+            "secondary_state": ("on" if s_on else "standby") if has_sec else "disabled",
+            "primary_on": p_on,
+            "secondary_on": s_on,
+            "all_off": all_off,
+            "override": {"primary": ov_p, "secondary": ov_s},
+            "override_active": (ov_p is not None) or (ov_s is not None),
+            "next_change_primary": p_next["label"] if p_next else "",
+            "next_change_secondary": (s_next["label"] if s_next else "") if has_sec else "",
+        }
+
+    def set_override(self, action: str, target: str = "both") -> dict[str, Any]:
+        val: str | None = None if action == "auto" else action
+        with self._lock:
+            if target in ("both", "primary"):
+                self._override["primary"] = val
+            if target in ("both", "secondary"):
+                self._override["secondary"] = val
+        return self.sync_now(force=True)
+
+    def _set_touch_enabled(self, cfg: dict[str, Any], enabled: bool) -> None:
+        touch_dev = (cfg.get("touch") or {}).get("device", "").strip()
+        if not touch_dev or not shutil.which("xinput"):
+            return
+        ids: list[str] = []
+        if touch_dev.isdigit():
+            ids = [touch_dev]
+        else:
+            res = run_cmd(["xinput", "list"], timeout=4)
+            if res.returncode == 0:
+                line_re = re.compile(r"^(.*?)\s+id=(\d+)\s+\[slave\s+pointer\b")
+                for line in res.stdout.splitlines():
+                    m = line_re.search(line)
+                    if not m:
+                        continue
+                    cleaned = re.sub(r"^[\s\u239c\u23a1\u23a2\u23a3\u21b3│├└─]+", "", m.group(1)).strip()
+                    if cleaned == touch_dev:
+                        ids.append(m.group(2))
+        cmd_op = "enable" if enabled else "disable"
+        for dev_id in ids:
+            run_cmd(["xinput", cmd_op, dev_id], timeout=4)
+
+    def _set_audio_muted(self, muted: bool) -> None:
+        if not shutil.which("pactl"):
+            return
+        flag = "1" if muted else "0"
+        run_cmd(["pactl", "set-sink-mute", "@DEFAULT_SINK@", flag], timeout=4)
+        if muted:
+            # Alle aktiven Sinks stummschalten, damit kein Ton waehrend Standby laeuft
+            res = run_cmd(["pactl", "list", "short", "sinks"], timeout=4)
+            if res.returncode == 0:
+                for line in res.stdout.splitlines():
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        run_cmd(["pactl", "set-sink-mute", parts[1], "1"], timeout=3)
+
+    def _run_apply_script(self, force_off_primary: bool = False, force_off_secondary: bool = False, force_mute: bool = False) -> tuple[bool, str, list[str]]:
+        if not APPLY_SCRIPT.is_file():
+            return True, "", [f"Apply-Skript nicht gefunden: {APPLY_SCRIPT}"]
+        env = build_runtime_env()
+        env["KIOSX_FORCE_OFF_PRIMARY"] = "1" if force_off_primary else "0"
+        env["KIOSX_FORCE_OFF_SECONDARY"] = "1" if force_off_secondary else "0"
+        env["KIOSX_FORCE_MUTE"] = "1" if force_mute else "0"
+        try:
+            res = subprocess.run(
+                ["/usr/bin/env", "bash", str(APPLY_SCRIPT)],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=env,
+                check=False,
+            )
+            combined = "\n".join(part for part in (res.stdout.strip(), res.stderr.strip()) if part)
+            warnings = [
+                line for line in combined.splitlines() if "[kiosX WARN]" in line or "[kiosX ERROR]" in line
+            ]
+            return res.returncode == 0, combined, warnings
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return False, "", [f"Fehler bei kiosk-apply.sh: {exc}"]
+
+    def sync_now(self, cfg: dict[str, Any] | None = None, force: bool = False) -> dict[str, Any]:
+        cfg = cfg or load_config(ensure_id=False)
+        status = self.evaluate(cfg)
+        target_tuple = (status["primary_on"], status["secondary_on"], status["all_off"])
+
+        with self._lock:
+            prev_tuple = self._applied_state
+            state_changed = (prev_tuple != target_tuple)
+
+        apply_ok = True
+        apply_output = ""
+        warnings: list[str] = []
+
+        # Nichts an X11 tun, wenn Zeitplan aus ist, kein Override aktiv und kein force
+        if not status["enabled"] and not status["override_active"] and not force:
+            if prev_tuple is not None and not prev_tuple[2]:
+                return {"status": status, "apply_ok": True, "output": "", "warnings": []}
+
+        # 1) Komplett-Standby (alle aktiven Displays AUS)
+        if status["all_off"]:
+            if state_changed or force:
+                self._set_touch_enabled(cfg, False)
+                self._set_audio_muted(True)
+            # DPMS-Standby setzen / im Standby periodisch absichern
+            if shutil.which("xset"):
+                run_cmd(["xset", "+dpms"], timeout=4)
+                run_cmd(["xset", "dpms", "0", "0", "0"], timeout=4)
+                run_cmd(["xset", "dpms", "force", "off"], timeout=4)
+            with self._lock:
+                self._applied_state = target_tuple
+            return {"status": status, "apply_ok": True, "output": "Standby (DPMS off, Touch aus, Audio stumm)", "warnings": []}
+
+        # 2) Mindestens ein Display EIN
+        if state_changed or force:
+            waking_from_dpms = prev_tuple is not None and prev_tuple[2]
+            if shutil.which("xset"):
+                run_cmd(["xset", "dpms", "force", "on"], timeout=4)
+                run_cmd(["xset", "-dpms"], timeout=4)
+                run_cmd(["xset", "s", "off"], timeout=4)
+                run_cmd(["xset", "s", "noblank"], timeout=4)
+                run_cmd(["xset", "s", "reset"], timeout=4)
+            if waking_from_dpms:
+                # Kurz warten, bis HDMI/DP-Monitor EDID nach Standby wieder meldet
+                time.sleep(1.0)
+
+            # Beim Einschalten IMMER kiosk-apply.sh ausfuehren -> stellt Aufloesung,
+            # Drehung, Wallpaper, Touch (enable + map + Matrix) und Audio (unmute + Vol) wieder her!
+            apply_ok, apply_output, warnings = self._run_apply_script(
+                force_off_primary=not status["primary_on"],
+                force_off_secondary=status["has_secondary"] and not status["secondary_on"],
+                force_mute=False,
+            )
+            with self._lock:
+                self._applied_state = target_tuple
+
+        return {"status": status, "apply_ok": apply_ok, "output": apply_output, "warnings": warnings}
+
+    def trigger_wakeup(self) -> None:
+        self._wakeup.set()
+
+    def _loop(self) -> None:
+        # Beim Dienststart kurz warten, bis X11 ggf. bereit ist
+        self._wakeup.wait(3.0)
+        while not self._stop_event.is_set():
+            self._wakeup.clear()
+            try:
+                cfg = load_config(ensure_id=False)
+                sched = cfg.get("schedule") or {}
+                with self._lock:
+                    has_override = any(v is not None for v in self._override.values())
+                if sched.get("enabled") or has_override:
+                    self.sync_now(cfg=cfg, force=False)
+            except Exception:
+                pass
+            self._wakeup.wait(20.0)
+
+
+schedule_manager = DisplayScheduleManager()
+
+
+# ---------------------------------------------------------------------------
 # Konfiguration laden, validieren & atomar speichern
 # ---------------------------------------------------------------------------
 def merge_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
@@ -339,6 +721,44 @@ def merge_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
         cfg["audio"]["volume"] = max(0, min(100, int(cfg["audio"]["volume"])))
     except (TypeError, ValueError):
         cfg["audio"]["volume"] = 75
+
+    # Zeitplan-Sektion sanft zusammenfuehren
+    raw_sched = raw.get("schedule")
+    if isinstance(raw_sched, dict):
+        sched = cfg["schedule"]
+        if "enabled" in raw_sched:
+            sched["enabled"] = bool(raw_sched["enabled"])
+        tz_val = str(raw_sched.get("timezone") or "").strip()
+        if tz_val:
+            sched["timezone"] = tz_val
+        scope_val = str(raw_sched.get("scope") or "").strip().lower()
+        if scope_val in VALID_SCHEDULE_SCOPES:
+            sched["scope"] = scope_val
+
+        for target in ("primary", "secondary"):
+            raw_plan = raw_sched.get(target)
+            if not isinstance(raw_plan, dict):
+                continue
+            preset = str(raw_plan.get("preset") or "inhouse").strip().lower()
+            if preset not in VALID_SCHEDULE_PRESETS:
+                preset = "custom"
+            sched[target]["preset"] = preset
+            if preset in SCHEDULE_PRESETS and not isinstance(raw_plan.get("days"), dict):
+                sched[target]["days"] = copy.deepcopy(SCHEDULE_PRESETS[preset])
+            elif isinstance(raw_plan.get("days"), dict):
+                base_days = copy.deepcopy(
+                    SCHEDULE_PRESETS.get(preset, SCHEDULE_PRESETS["inhouse"])
+                )
+                for day_key in DAY_KEYS:
+                    d_raw = raw_plan["days"].get(day_key)
+                    if isinstance(d_raw, dict):
+                        if "enabled" in d_raw:
+                            base_days[day_key]["enabled"] = bool(d_raw["enabled"])
+                        if isinstance(d_raw.get("start"), str) and re.match(r"^\d{2}:\d{2}$", d_raw["start"].strip()):
+                            base_days[day_key]["start"] = d_raw["start"].strip()
+                        if isinstance(d_raw.get("end"), str) and re.match(r"^\d{2}:\d{2}$", d_raw["end"].strip()):
+                            base_days[day_key]["end"] = d_raw["end"].strip()
+                sched[target]["days"] = base_days
 
     return cfg
 
@@ -452,6 +872,41 @@ def validate_and_normalize_payload(
         audio["volume"] = max(0, min(100, int(audio.get("volume", 75))))
     except (TypeError, ValueError):
         return None, "Lautstaerke muss eine Zahl zwischen 0 und 100 sein."
+
+    # Zeitplan validieren (wenn im Payload vorhanden; sonst bestehenden beibehalten)
+    if "schedule" not in payload and existing_config and isinstance(existing_config.get("schedule"), dict):
+        cfg["schedule"] = merge_defaults({"schedule": existing_config["schedule"]})["schedule"]
+    else:
+        sched = cfg["schedule"]
+        tz_name = str(sched.get("timezone") or DEFAULT_TIMEZONE).strip() or DEFAULT_TIMEZONE
+        try:
+            ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            return None, f"Unbekannte Zeitzone: {tz_name}"
+        sched["timezone"] = tz_name
+
+        if sched.get("scope") not in VALID_SCHEDULE_SCOPES:
+            return None, f"Ungueltiger Zeitplan-Bereich: {sched.get('scope')}"
+
+        for target in ("primary", "secondary"):
+            plan = sched[target]
+            preset = str(plan.get("preset") or "inhouse").strip().lower()
+            if preset not in VALID_SCHEDULE_PRESETS:
+                return None, f"Ungueltige Zeitplan-Vorlage: {preset}"
+            plan["preset"] = preset
+            days = plan.get("days")
+            if not isinstance(days, dict):
+                return None, f"Fehlende Wochentage im Zeitplan ({target})."
+            for day_key in DAY_KEYS:
+                d = days.get(day_key)
+                if not isinstance(d, dict):
+                    return None, f"Fehlender Tag '{day_key}' im Zeitplan."
+                d["enabled"] = bool(d.get("enabled", False))
+                for field in ("start", "end"):
+                    val = str(d.get(field, "")).strip()
+                    if not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", val):
+                        return None, f"Ungueltige Uhrzeit ({DAY_LABELS_DE[day_key]} {field}): '{val}'"
+                    d[field] = val
 
     return cfg, None
 
@@ -980,6 +1435,7 @@ def build_device_info(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         "config_path": str(CONFIG_PATH),
         "touch_test_active": get_touch_test_pid() is not None,
         "browser_running": is_browser_running(),
+        "schedule_status": schedule_manager.evaluate(cfg),
     }
 
 
@@ -1069,7 +1525,12 @@ def generate_stereo_test_wav(path: str) -> None:
 def index():
     config = load_config()
     hardware = collect_hardware(config)
-    return render_template("index.html", config=config, hardware=hardware)
+    return render_template(
+        "index.html",
+        config=config,
+        hardware=hardware,
+        schedule_presets=SCHEDULE_PRESETS,
+    )
 
 
 @app.route("/splash", methods=["GET"])
@@ -1181,27 +1642,12 @@ def save_settings():
     # mDNS-Alias sofort aktualisieren, falls sich die Kiosk-ID geaendert hat
     mdns_manager.sync_now(cfg.get("device_id"))
 
-    apply_output = ""
-    apply_ok = True
-
-    if APPLY_SCRIPT.is_file():
-        try:
-            res = run_cmd(["/usr/bin/env", "bash", str(APPLY_SCRIPT)], timeout=15)
-            combined = "\n".join(part for part in (res.stdout.strip(), res.stderr.strip()) if part)
-            apply_output = combined
-            warnings.extend(
-                line for line in combined.splitlines() if "[kiosX WARN]" in line or "[kiosX ERROR]" in line
-            )
-            if res.returncode != 0:
-                apply_ok = False
-        except subprocess.TimeoutExpired:
-            apply_ok = False
-            warnings.append("Zeitueberschreitung beim Ausfuehren von kiosk-apply.sh.")
-        except OSError as exc:
-            apply_ok = False
-            warnings.append(f"Fehler beim Starten von kiosk-apply.sh: {exc}")
-    else:
-        warnings.append(f"Apply-Skript nicht gefunden: {APPLY_SCRIPT}")
+    # Konfiguration inkl. Zeitplan-Zustand sofort anwenden
+    sync_res = schedule_manager.sync_now(cfg=cfg, force=True)
+    schedule_manager.trigger_wakeup()
+    apply_ok = sync_res["apply_ok"]
+    apply_output = sync_res["output"]
+    warnings.extend(sync_res["warnings"])
 
     if not apply_ok:
         return (
@@ -1212,6 +1658,7 @@ def save_settings():
                     "warnings": warnings,
                     "output": apply_output,
                     "config": cfg,
+                    "info": build_device_info(cfg),
                 }
             ),
             500,
@@ -1540,8 +1987,38 @@ def api_update_apply():
         _UPDATE_LOCK.release()
 
 
+@app.route("/api/display-power", methods=["POST"])
+def api_display_power():
+    """Manuelles Ein-/Ausschalten (Standby) oder Zuruecksetzen auf Zeitplan-Automatik."""
+    payload = request.get_json(silent=True) or {}
+    action = str(payload.get("action", "")).strip().lower()
+    target = str(payload.get("target", "both")).strip().lower()
+
+    if action not in ("on", "off", "auto"):
+        return jsonify({"ok": False, "message": "Ungueltige Aktion (erlaubt: on, off, auto)."}), 400
+    if target not in ("both", "primary", "secondary"):
+        return jsonify({"ok": False, "message": "Ungueltiges Ziel (erlaubt: both, primary, secondary)."}), 400
+
+    res = schedule_manager.set_override(action=action, target=target)
+    status = res["status"]
+    labels = {
+        "on": "Display(s) eingeschaltet (manuelle Uebersteuerung aktiv – Aufloesung, Touch & Audio wiederhergestellt).",
+        "off": "Display(s) in Standby versetzt (Touch gesperrt, Audio stummgeschaltet).",
+        "auto": "Zeitplan-Automatik wieder aktiv.",
+    }
+    return jsonify(
+        {
+            "ok": res["apply_ok"],
+            "message": labels[action],
+            "schedule_status": status,
+            "warnings": res["warnings"],
+        }
+    )
+
+
 if __name__ == "__main__":
-    # Kiosk-ID beim Start sicherstellen und mDNS-Alias (kiosx-<id>.local) aktivieren
+    # Kiosk-ID beim Start sicherstellen, mDNS-Alias & Display-Zeitplan starten
     load_config(ensure_id=True)
     mdns_manager.start()
+    schedule_manager.start()
     app.run(host=LISTEN_HOST, port=LISTEN_PORT, debug=False, threaded=True)

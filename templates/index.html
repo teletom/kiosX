@@ -17,11 +17,11 @@
     body {
       font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       margin: 0;
-      padding-bottom: 5rem;
+      padding-bottom: 5.5rem;
     }
 
     main.container {
-      max-width: 960px;
+      max-width: 980px;
       margin: 0 auto;
       padding: 1.25rem 1rem 3rem;
     }
@@ -32,7 +32,7 @@
       align-items: center;
       justify-content: space-between;
       gap: 0.75rem;
-      margin-bottom: 1.5rem;
+      margin-bottom: 1rem;
       padding-bottom: 1rem;
       border-bottom: 1px solid var(--pico-muted-border-color, #d1d5db);
     }
@@ -97,27 +97,88 @@
     .dot.warn { background: var(--kiosx-warn); }
     .dot.err  { background: var(--kiosx-err); }
 
-    article.card {
-      border-radius: var(--kiosx-radius);
-      margin-bottom: 1.25rem;
-      padding: 1.25rem 1.4rem;
+    .accordion-controls {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
     }
 
-    article.card > header {
+    .accordion-controls button {
+      width: auto;
+      margin: 0;
+      padding: 0.28rem 0.7rem;
+      font-size: 0.8rem;
+    }
+
+    /* Einklappbare Sektions-Karten */
+    details.section-card {
+      border-radius: var(--kiosx-radius);
+      margin-bottom: 0.85rem;
+      border: 1px solid var(--pico-muted-border-color, #d1d5db);
+      background: var(--pico-card-background-color, #ffffff);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+      overflow: hidden;
+      padding-bottom: 0;
+    }
+
+    details.section-card > summary {
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       justify-content: space-between;
-      gap: 0.5rem;
-      margin: -1.25rem -1.4rem 1.15rem;
-      padding: 0.9rem 1.4rem;
-      border-top-left-radius: var(--kiosx-radius);
-      border-top-right-radius: var(--kiosx-radius);
+      gap: 0.5rem 1rem;
+      padding: 0.95rem 1.25rem;
+      margin: 0;
+      cursor: pointer;
+      list-style: none;
+      background: var(--pico-card-sectioning-background-color, rgba(148, 163, 184, 0.08));
+      font-weight: 600;
+      user-select: none;
     }
 
-    article.card > header h2 {
-      margin: 0;
-      font-size: 1.1rem;
+    details.section-card > summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.section-card > summary::after {
+      content: "▸";
+      font-size: 1rem;
+      opacity: 0.7;
+      transition: transform 0.16s ease;
+      margin-left: 0.35rem;
+    }
+
+    details.section-card[open] > summary::after {
+      transform: rotate(90deg);
+    }
+
+    details.section-card[open] > summary {
+      border-bottom: 1px solid var(--pico-muted-border-color, #d1d5db);
+    }
+
+    .summary-title {
+      font-size: 1.04rem;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .summary-meta {
+      margin-left: auto;
+      font-size: 0.82rem;
+      font-weight: 500;
+      opacity: 0.78;
+      text-align: right;
+      max-width: 60%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .section-body {
+      padding: 1.2rem 1.35rem;
     }
 
     .hw-alert {
@@ -175,15 +236,93 @@
     .row-actions {
       display: flex;
       flex-wrap: wrap;
-      gap: 0.75rem;
+      gap: 0.65rem;
       align-items: center;
-      margin-top: 0.5rem;
+      margin-top: 0.6rem;
     }
 
     .row-actions button,
     .row-actions a[role="button"] {
       width: auto;
       margin-bottom: 0;
+    }
+
+    /* Zeitplan-Tabelle */
+    .schedule-plan-box {
+      border: 1px solid var(--pico-muted-border-color, #d1d5db);
+      border-radius: 0.6rem;
+      padding: 1rem 1.1rem;
+      margin-top: 0.85rem;
+      background: var(--pico-card-sectioning-background-color, rgba(148, 163, 184, 0.04));
+    }
+
+    .schedule-plan-header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .schedule-plan-header h3 {
+      margin: 0;
+      font-size: 0.98rem;
+    }
+
+    .schedule-quick-btns {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
+
+    .schedule-quick-btns button {
+      margin: 0;
+      width: auto;
+      padding: 0.25rem 0.6rem;
+      font-size: 0.78rem;
+    }
+
+    .day-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(255px, 1fr));
+      gap: 0.5rem 0.85rem;
+    }
+
+    .day-row {
+      display: grid;
+      grid-template-columns: 4.5rem 1fr auto 1fr;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.4rem 0.55rem;
+      border-radius: 0.45rem;
+      border: 1px solid var(--pico-muted-border-color, rgba(148, 163, 184, 0.35));
+      background: var(--pico-card-background-color, #ffffff);
+    }
+
+    .day-row label {
+      margin: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-weight: 600;
+      font-size: 0.88rem;
+      cursor: pointer;
+    }
+
+    .day-row input[type="checkbox"] {
+      margin: 0;
+    }
+
+    .day-row input[type="time"] {
+      margin: 0;
+      padding: 0.3rem 0.4rem;
+      font-size: 0.86rem;
+      height: auto;
+    }
+
+    .day-row.day-off {
+      opacity: 0.55;
     }
 
     .volume-header {
@@ -210,6 +349,7 @@
       justify-content: flex-end;
       align-items: center;
       padding: 0.85rem 1.1rem;
+      margin-top: 1rem;
       border-radius: var(--kiosx-radius);
       background: var(--pico-card-background-color, #ffffff);
       border: 1px solid var(--pico-muted-border-color, #d1d5db);
@@ -279,6 +419,7 @@
       .save-bar { justify-content: stretch; }
       .save-bar button { width: 100%; }
       .save-hint { width: 100%; margin-right: 0; }
+      .summary-meta { max-width: 100%; margin-left: 0; text-align: left; }
     }
   </style>
 </head>
@@ -300,6 +441,11 @@
           <span class="dot {{ 'ok' if hardware.displays.available else 'warn' }}"></span>
           X11: {{ hardware.displays.displays|length }} Monitor(e)
         </span>
+        <span class="badge" id="badge-schedule" title="Monitor-Zeitplan">
+          {% set ss = hardware.system.schedule_status %}
+          <span class="dot {{ 'warn' if ss.all_off else 'ok' }}"></span>
+          {{ 'Standby' if ss.all_off else 'Aktiv' }}
+        </span>
         <span class="badge" id="badge-audio" title="PipeWire Audio-Status">
           <span class="dot {{ 'ok' if hardware.audio.available else 'warn' }}"></span>
           Audio: {{ hardware.audio.cards|length }} Karte(n)
@@ -310,249 +456,379 @@
       </div>
     </div>
 
+    <div class="accordion-controls">
+      <button type="button" id="btn-expand-all" class="outline secondary">Alle aufklappen</button>
+      <button type="button" id="btn-collapse-all" class="outline secondary">Alle zuklappen</button>
+    </div>
+
     <form id="kiosk-form" novalidate>
       <!-- 1. Kiosk-URL, Kennung & Start-Anzeige -->
-      <article class="card">
-        <header>
-          <h2>1. Kiosk-URL, Kennung &amp; Start-Anzeige</h2>
-          <small>Chromium Kiosk-Modus</small>
-        </header>
+      <details class="section-card" data-section="url">
+        <summary>
+          <span class="summary-title">1. Kiosk-URL, Kennung &amp; Start-Anzeige</span>
+          <span class="summary-meta" id="meta-url">{{ config.url }}</span>
+        </summary>
+        <div class="section-body">
+          <div class="net-strip" id="net-strip">
+            <span><strong>mDNS:</strong> <code id="info-mdns">{{ hardware.system.mdns_url }}</code></span>
+            {% if hardware.system.lan_url %}
+            <span><strong>LAN:</strong> <code>{{ hardware.system.lan_url }}</code></span>
+            {% endif %}
+            {% if hardware.system.tailscale_url %}
+            <span><strong>Tailscale:</strong> <code>{{ hardware.system.tailscale_url }}</code></span>
+            {% endif %}
+          </div>
 
-        <div class="net-strip" id="net-strip">
-          <span><strong>mDNS:</strong> <code id="info-mdns">{{ hardware.system.mdns_url }}</code></span>
-          {% if hardware.system.lan_url %}
-          <span><strong>LAN:</strong> <code>{{ hardware.system.lan_url }}</code></span>
-          {% endif %}
-          {% if hardware.system.tailscale_url %}
-          <span><strong>Tailscale:</strong> <code>{{ hardware.system.tailscale_url }}</code></span>
-          {% endif %}
-        </div>
-
-        <label for="kiosk-url">
-          Start-URL
-          <input
-            type="url"
-            id="kiosk-url"
-            name="url"
-            value="{{ config.url }}"
-            placeholder="https://dashboard.example.com"
-            required
-          >
-        </label>
-
-        <div class="grid">
-          <label for="device-id">
-            Kiosk-ID (4 Zeichen, z.&nbsp;B. f&uuml;r mDNS &amp; Web-App)
-            <div class="inline-input-group">
-              <input
-                type="text"
-                id="device-id"
-                name="device_id"
-                value="{{ config.device_id }}"
-                maxlength="12"
-                placeholder="K7M4"
-              >
-              <button type="button" id="btn-gen-id" class="secondary outline" title="Neue 4-stellige ID erzeugen">
-                Neu
-              </button>
-            </div>
-          </label>
-
-          <label for="splash-seconds">
-            Start-Info-Anzeige nach Boot / Neustart (Sekunden)
+          <label for="kiosk-url">
+            Start-URL
             <input
-              type="number"
-              id="splash-seconds"
-              name="splash_seconds"
-              min="0"
-              max="120"
-              step="1"
-              value="{{ config.splash_seconds }}"
+              type="url"
+              id="kiosk-url"
+              name="url"
+              value="{{ config.url }}"
+              placeholder="https://dashboard.example.com"
+              required
             >
           </label>
-        </div>
-        <small class="helper-text">
-          <code>0</code> deaktiviert die Start-Anzeige. Bei <code>15</code> werden ID, Hostname, IP und QR-Code 15&nbsp;Sekunden lang angezeigt.
-        </small>
 
-        <label for="wallpaper-url">
-          Hintergrundbild-URL (optional, lokal zwischengespeichert)
-          <input
-            type="url"
-            id="wallpaper-url"
-            name="wallpaper_url"
-            value="{{ config.wallpaper_url }}"
-            placeholder="https://images.unsplash.com/photo-1493606278519-11aa9f86e40a?auto=format&fit=crop&w=1920&q=85"
-          >
-        </label>
+          <div class="grid">
+            <label for="device-id">
+              Kiosk-ID (4 Zeichen, z.&nbsp;B. f&uuml;r mDNS &amp; Web-App)
+              <div class="inline-input-group">
+                <input
+                  type="text"
+                  id="device-id"
+                  name="device_id"
+                  value="{{ config.device_id }}"
+                  maxlength="12"
+                  placeholder="K7M4"
+                >
+                <button type="button" id="btn-gen-id" class="secondary outline" title="Neue 4-stellige ID erzeugen">
+                  Neu
+                </button>
+              </div>
+            </label>
 
-        <div class="row-actions">
-          <button type="button" id="btn-restart-browser" class="secondary outline">
-            Browser neu starten
-          </button>
-          <a href="/splash" target="_blank" rel="noopener" role="button" class="secondary outline">
-            Start-Anzeige Vorschau
-          </a>
+            <label for="splash-seconds">
+              Start-Info-Anzeige nach Boot / Neustart (Sekunden)
+              <input
+                type="number"
+                id="splash-seconds"
+                name="splash_seconds"
+                min="0"
+                max="120"
+                step="1"
+                value="{{ config.splash_seconds }}"
+              >
+            </label>
+          </div>
+          <small class="helper-text">
+            <code>0</code> deaktiviert die Start-Anzeige. Bei <code>15</code> werden ID, Hostname, IP und QR-Code 15&nbsp;Sekunden lang angezeigt.
+          </small>
+
+          <label for="wallpaper-url">
+            Hintergrundbild-URL (optional, lokal zwischengespeichert)
+            <input
+              type="url"
+              id="wallpaper-url"
+              name="wallpaper_url"
+              value="{{ config.wallpaper_url }}"
+              placeholder="https://images.unsplash.com/photo-1493606278519-11aa9f86e40a?auto=format&fit=crop&w=1920&q=85"
+            >
+          </label>
+
+          <div class="row-actions">
+            <button type="button" id="btn-restart-browser" class="secondary outline">
+              Browser neu starten
+            </button>
+            <a href="/splash" target="_blank" rel="noopener" role="button" class="secondary outline">
+              Start-Anzeige Vorschau
+            </a>
+          </div>
         </div>
-      </article>
+      </details>
 
       <!-- 2. Display-Konfiguration -->
-      <article class="card">
-        <header>
-          <h2>2. Display-Konfiguration</h2>
-          <small>xrandr Live-Umschaltung</small>
-        </header>
-
-        <div id="display-alert" class="hw-alert" {% if hardware.displays.available and hardware.displays.displays %}hidden{% endif %}>
-          {% if not hardware.displays.available %}
-            X11 / xrandr derzeit nicht erreichbar: {{ hardware.displays.error }}
-          {% else %}
-            Derzeit ist kein Monitor verbunden. Einstellungen k&ouml;nnen dennoch gespeichert werden.
-          {% endif %}
-        </div>
-
-        <div class="grid">
-          <label for="primary-output">
-            Prim&auml;res Display
-            <select id="primary-output" name="primary_output"></select>
-          </label>
-
-          <label for="display-resolution">
-            Aufl&ouml;sung
-            <select id="display-resolution" name="resolution"></select>
-          </label>
-
-          <label for="display-rotation">
-            Drehung
-            <select id="display-rotation" name="rotation">
-              <option value="normal"   {{ 'selected' if config.display.rotation == 'normal' }}>0&deg; (Normal)</option>
-              <option value="right"    {{ 'selected' if config.display.rotation == 'right' }}>90&deg; (Rechts)</option>
-              <option value="inverted" {{ 'selected' if config.display.rotation == 'inverted' }}>180&deg; (Kopfstehend)</option>
-              <option value="left"     {{ 'selected' if config.display.rotation == 'left' }}>270&deg; (Links)</option>
-            </select>
-          </label>
-        </div>
-
-        <hr>
-
-        <div class="grid">
-          <label for="secondary-output">
-            Zweites Display (optional)
-            <select id="secondary-output" name="secondary_output"></select>
-          </label>
-
-          <label for="secondary-mode">
-            Modus Zweitdisplay
-            <select id="secondary-mode" name="secondary_mode">
-              <option value="off"    {{ 'selected' if config.display.secondary_mode == 'off' }}>Aus (deaktiviert)</option>
-              <option value="right"  {{ 'selected' if config.display.secondary_mode == 'right' }}>Rechts erweitern</option>
-              <option value="left"   {{ 'selected' if config.display.secondary_mode == 'left' }}>Links erweitern</option>
-              <option value="mirror" {{ 'selected' if config.display.secondary_mode == 'mirror' }}>Spiegeln (Mirror)</option>
-            </select>
-          </label>
-        </div>
-      </article>
-
-      <!-- 3. Touch-Geraet & Kalibrierung -->
-      <article class="card">
-        <header>
-          <h2>3. Touch-Ger&auml;t &amp; Kalibrierung</h2>
-          <small>xinput map-to-output</small>
-        </header>
-
-        <div id="touch-alert" class="hw-alert" {% if hardware.touch.available and hardware.touch.devices %}hidden{% endif %}>
-          {% if not hardware.touch.available %}
-            xinput derzeit nicht erreichbar: {{ hardware.touch.error }}
-          {% else %}
-            Keine Touch-/Pointer-Eingabeger&auml;te erkannt.
-          {% endif %}
-        </div>
-
-        <div class="grid">
-          <label for="touch-device">
-            Touch-Eingabeger&auml;t
-            <select id="touch-device" name="touch_device"></select>
-          </label>
-
-          <label for="touch-rotation">
-            Touch-Korrektur
-            <select id="touch-rotation" name="touch_rotation">
-              <option value="auto" {{ 'selected' if config.touch.rotation in ('auto', '0') }}>Automatisch (folgt Display-Drehung)</option>
-              <option value="90"   {{ 'selected' if config.touch.rotation == '90' }}>+90&deg; Korrektur (verdrehtes Panel)</option>
-              <option value="180"  {{ 'selected' if config.touch.rotation == '180' }}>+180&deg; Korrektur (kopfstehendes Panel)</option>
-              <option value="270"  {{ 'selected' if config.touch.rotation == '270' }}>+270&deg; Korrektur (verdrehtes Panel)</option>
-            </select>
-          </label>
-        </div>
-        <small class="helper-text">
-          Bei <strong>Automatisch</strong> &uuml;bernimmt <code>xinput map-to-output</code> die Display-Drehung direkt. Eine Korrektur ist nur bei physisch verdreht eingebauten Touch-Panels n&ouml;tig.
-        </small>
-
-        <div class="row-actions">
-          <button
-            type="button"
-            id="btn-touch-test"
-            class="outline {{ 'active-test' if hardware.system.touch_test_active }}"
-            data-active="{{ 'true' if hardware.system.touch_test_active else 'false' }}"
-          >
-            {% if hardware.system.touch_test_active %}
-              Touch-Ecken-Test beenden
+      <details class="section-card" data-section="display">
+        <summary>
+          <span class="summary-title">2. Display-Konfiguration</span>
+          <span class="summary-meta" id="meta-display">
+            {{ config.display.primary_output or 'Auto' }} &middot; {{ config.display.resolution }} &middot; {{ config.display.rotation }}
+          </span>
+        </summary>
+        <div class="section-body">
+          <div id="display-alert" class="hw-alert" {% if hardware.displays.available and hardware.displays.displays %}hidden{% endif %}>
+            {% if not hardware.displays.available %}
+              X11 / xrandr derzeit nicht erreichbar: {{ hardware.displays.error }}
             {% else %}
-              Touch-Ecken-Test starten
+              Derzeit ist kein Monitor verbunden. Einstellungen k&ouml;nnen dennoch gespeichert werden.
             {% endif %}
-          </button>
-        </div>
-      </article>
-
-      <!-- 4. Audio-Ausgabe -->
-      <article class="card">
-        <header>
-          <h2>4. Audio-Ausgabe</h2>
-          <small>PipeWire / pactl</small>
-        </header>
-
-        <div id="audio-alert" class="hw-alert" {% if hardware.audio.available and hardware.audio.cards %}hidden{% endif %}>
-          {% if not hardware.audio.available %}
-            PipeWire / pactl derzeit nicht erreichbar: {{ hardware.audio.error }}
-          {% else %}
-            Keine Soundkarten erkannt.
-          {% endif %}
-        </div>
-
-        <div class="grid">
-          <label for="audio-card">
-            Soundkarte
-            <select id="audio-card" name="audio_card"></select>
-          </label>
-
-          <label for="audio-profile">
-            Ausgabe-Profil (HDMI vs. Line-Out)
-            <select id="audio-profile" name="audio_profile"></select>
-          </label>
-        </div>
-
-        <div>
-          <div class="volume-header">
-            <label for="audio-volume" style="margin: 0;">Lautst&auml;rke</label>
-            <span class="volume-value" id="audio-volume-label">{{ config.audio.volume }} %</span>
           </div>
-          <input
-            type="range"
-            id="audio-volume"
-            name="audio_volume"
-            min="0"
-            max="100"
-            step="1"
-            value="{{ config.audio.volume }}"
-          >
-        </div>
 
-        <div class="row-actions">
-          <button type="button" id="btn-test-audio" class="secondary outline">
-            Test-Ton abspielen
-          </button>
+          <div class="grid">
+            <label for="primary-output">
+              Prim&auml;res Display
+              <select id="primary-output" name="primary_output"></select>
+            </label>
+
+            <label for="display-resolution">
+              Aufl&ouml;sung
+              <select id="display-resolution" name="resolution"></select>
+            </label>
+
+            <label for="display-rotation">
+              Drehung
+              <select id="display-rotation" name="rotation">
+                <option value="normal"   {{ 'selected' if config.display.rotation == 'normal' }}>0&deg; (Normal)</option>
+                <option value="right"    {{ 'selected' if config.display.rotation == 'right' }}>90&deg; (Rechts)</option>
+                <option value="inverted" {{ 'selected' if config.display.rotation == 'inverted' }}>180&deg; (Kopfstehend)</option>
+                <option value="left"     {{ 'selected' if config.display.rotation == 'left' }}>270&deg; (Links)</option>
+              </select>
+            </label>
+          </div>
+
+          <hr>
+
+          <div class="grid">
+            <label for="secondary-output">
+              Zweites Display (optional)
+              <select id="secondary-output" name="secondary_output"></select>
+            </label>
+
+            <label for="secondary-mode">
+              Modus Zweitdisplay
+              <select id="secondary-mode" name="secondary_mode">
+                <option value="off"    {{ 'selected' if config.display.secondary_mode == 'off' }}>Aus (deaktiviert)</option>
+                <option value="right"  {{ 'selected' if config.display.secondary_mode == 'right' }}>Rechts erweitern</option>
+                <option value="left"   {{ 'selected' if config.display.secondary_mode == 'left' }}>Links erweitern</option>
+                <option value="mirror" {{ 'selected' if config.display.secondary_mode == 'mirror' }}>Spiegeln (Mirror)</option>
+              </select>
+            </label>
+          </div>
         </div>
-      </article>
+      </details>
+
+      <!-- 3. Zeitplan (Monitor Ein/Aus) -->
+      <details class="section-card" data-section="schedule">
+        <summary>
+          <span class="summary-title">3. Zeitplan (Monitor Ein/Aus)</span>
+          <span class="summary-meta" id="meta-schedule">
+            {% set ss = hardware.system.schedule_status %}
+            {% if not config.schedule.enabled %}
+              Deaktiviert (immer ein)
+            {% else %}
+              {{ 'Standby' if ss.all_off else 'Aktiv' }}{% if ss.next_change_primary %} &middot; {{ ss.next_change_primary }}{% endif %}
+            {% endif %}
+          </span>
+        </summary>
+        <div class="section-body">
+          {% set ss = hardware.system.schedule_status %}
+          <div class="net-strip" id="schedule-status-strip">
+            <span><strong>Kiosk-Zeit:</strong> <code id="sched-clock">{{ ss.local_day }} {{ ss.local_time }}</code> (<span id="sched-tz-label">{{ ss.timezone }}</span>)</span>
+            <span><strong>Prim&auml;r:</strong> <code id="sched-state-p">{{ 'Aktiv' if ss.primary_on else 'Standby' }}</code></span>
+            <span id="sched-state-s-wrap" {% if not ss.has_secondary %}hidden{% endif %}>
+              <strong>Sekund&auml;r:</strong> <code id="sched-state-s">{{ 'Aktiv' if ss.secondary_on else 'Standby' }}</code>
+            </span>
+            <span id="sched-next-wrap" {% if not ss.next_change_primary %}hidden{% endif %}>
+              <strong>N&auml;chster Wechsel:</strong> <code id="sched-next">{{ ss.next_change_primary }}</code>
+            </span>
+            <span id="sched-override-wrap" {% if not ss.override_active %}hidden{% endif %}>
+              <strong>Hinweis:</strong> <code>Manuelle &Uuml;bersteuerung aktiv</code>
+            </span>
+          </div>
+
+          <label style="margin-bottom: 1rem;">
+            <input type="checkbox" id="schedule-enabled" role="switch" {{ 'checked' if config.schedule.enabled }}>
+            <strong>Zeitsteuerung aktivieren</strong> (au&szlig;erhalb der aktiven Zeiten: Monitor-Standby, Touch aus, Audio stumm)
+          </label>
+
+          <div class="grid">
+            <label for="schedule-scope">
+              Geltungsbereich
+              <select id="schedule-scope">
+                <option value="both" {{ 'selected' if config.schedule.scope == 'both' }}>Beide Displays gemeinsam steuern</option>
+                <option value="separate" {{ 'selected' if config.schedule.scope == 'separate' }}>Prim&auml;r- &amp; Zweitdisplay getrennt steuern</option>
+              </select>
+            </label>
+
+            <label for="schedule-timezone">
+              Zeitzone
+              <select id="schedule-timezone">
+                {% for tz_opt in ['Europe/Vienna', 'Europe/Berlin', 'Europe/Zurich', 'UTC'] %}
+                <option value="{{ tz_opt }}" {{ 'selected' if config.schedule.timezone == tz_opt }}>{{ tz_opt }}</option>
+                {% endfor %}
+                {% if config.schedule.timezone not in ['Europe/Vienna', 'Europe/Berlin', 'Europe/Zurich', 'UTC'] %}
+                <option value="{{ config.schedule.timezone }}" selected>{{ config.schedule.timezone }}</option>
+                {% endif %}
+              </select>
+            </label>
+          </div>
+
+          <!-- Primär / Gemeinsamer Zeitplan -->
+          <div class="schedule-plan-box" id="schedule-box-primary">
+            <div class="schedule-plan-header">
+              <h3 id="schedule-primary-heading">Aktive Anzeigezeiten</h3>
+              <div class="schedule-quick-btns">
+                <button type="button" class="outline secondary" data-copy-days="weekdays" data-target="primary">Mo &rarr; Mo&ndash;Fr</button>
+                <button type="button" class="outline secondary" data-copy-days="all" data-target="primary">Mo &rarr; Alle Tage</button>
+              </div>
+            </div>
+
+            <label for="schedule-preset-primary">
+              Zeitplan-Vorlage
+              <select id="schedule-preset-primary" data-preset-target="primary">
+                <option value="inhouse" {{ 'selected' if config.schedule.primary.preset == 'inhouse' }}>Inhouse (Mo&ndash;Do 07:15&ndash;16:45, Fr 07:15&ndash;12:15, Sa&ndash;So aus)</option>
+                <option value="messe"   {{ 'selected' if config.schedule.primary.preset == 'messe' }}>Messe (Mo&ndash;So 08:00&ndash;18:00)</option>
+                <option value="custom"  {{ 'selected' if config.schedule.primary.preset == 'custom' }}>Eigener Zeitplan</option>
+              </select>
+            </label>
+
+            <div class="day-grid" id="days-primary"></div>
+          </div>
+
+          <!-- Sekundär-Display Zeitplan (nur bei scope == 'separate') -->
+          <div class="schedule-plan-box" id="schedule-box-secondary" {% if config.schedule.scope != 'separate' %}hidden{% endif %}>
+            <div class="schedule-plan-header">
+              <h3>Zweites Display &ndash; Aktive Anzeigezeiten</h3>
+              <div class="schedule-quick-btns">
+                <button type="button" class="outline secondary" data-copy-days="weekdays" data-target="secondary">Mo &rarr; Mo&ndash;Fr</button>
+                <button type="button" class="outline secondary" data-copy-days="all" data-target="secondary">Mo &rarr; Alle Tage</button>
+              </div>
+            </div>
+
+            <label for="schedule-preset-secondary">
+              Zeitplan-Vorlage (Zweites Display)
+              <select id="schedule-preset-secondary" data-preset-target="secondary">
+                <option value="inhouse" {{ 'selected' if config.schedule.secondary.preset == 'inhouse' }}>Inhouse (Mo&ndash;Do 07:15&ndash;16:45, Fr 07:15&ndash;12:15, Sa&ndash;So aus)</option>
+                <option value="messe"   {{ 'selected' if config.schedule.secondary.preset == 'messe' }}>Messe (Mo&ndash;So 08:00&ndash;18:00)</option>
+                <option value="custom"  {{ 'selected' if config.schedule.secondary.preset == 'custom' }}>Eigener Zeitplan</option>
+              </select>
+            </label>
+
+            <div class="day-grid" id="days-secondary"></div>
+          </div>
+
+          <hr>
+          <div class="row-actions">
+            <select id="power-test-target" style="width: auto; margin: 0; font-size: 0.88rem; padding: 0.45rem 2rem 0.45rem 0.7rem;" {% if config.schedule.scope != 'separate' %}hidden{% endif %}>
+              <option value="both">Beide Displays</option>
+              <option value="primary">Nur Prim&auml;rdisplay</option>
+              <option value="secondary">Nur Zweitdisplay</option>
+            </select>
+            <button type="button" id="btn-power-off" class="secondary outline">Jetzt Standby testen</button>
+            <button type="button" id="btn-power-on" class="secondary outline">Jetzt einschalten</button>
+            <button type="button" id="btn-power-auto" class="outline">Zeitplan-Automatik</button>
+          </div>
+          <small class="helper-text" style="margin-top: 0.45rem; margin-bottom: 0;">
+            Beim Wiedereinschalten werden Aufl&ouml;sung, Ausrichtung, Hintergrundbild, Touch-Kalibrierung und Audio automatisch komplett wiederhergestellt.
+          </small>
+        </div>
+      </details>
+
+      <!-- 4. Touch-Geraet & Kalibrierung -->
+      <details class="section-card" data-section="touch">
+        <summary>
+          <span class="summary-title">4. Touch-Ger&auml;t &amp; Kalibrierung</span>
+          <span class="summary-meta" id="meta-touch">
+            {{ config.touch.device or 'Kein Touch' }} &middot; {{ 'Auto' if config.touch.rotation in ('auto', '0') else '+' + config.touch.rotation + '°' }}
+          </span>
+        </summary>
+        <div class="section-body">
+          <div id="touch-alert" class="hw-alert" {% if hardware.touch.available and hardware.touch.devices %}hidden{% endif %}>
+            {% if not hardware.touch.available %}
+              xinput derzeit nicht erreichbar: {{ hardware.touch.error }}
+            {% else %}
+              Keine Touch-/Pointer-Eingabeger&auml;te erkannt.
+            {% endif %}
+          </div>
+
+          <div class="grid">
+            <label for="touch-device">
+              Touch-Eingabeger&auml;t
+              <select id="touch-device" name="touch_device"></select>
+            </label>
+
+            <label for="touch-rotation">
+              Touch-Korrektur
+              <select id="touch-rotation" name="touch_rotation">
+                <option value="auto" {{ 'selected' if config.touch.rotation in ('auto', '0') }}>Automatisch (folgt Display-Drehung)</option>
+                <option value="90"   {{ 'selected' if config.touch.rotation == '90' }}>+90&deg; Korrektur (verdrehtes Panel)</option>
+                <option value="180"  {{ 'selected' if config.touch.rotation == '180' }}>+180&deg; Korrektur (kopfstehendes Panel)</option>
+                <option value="270"  {{ 'selected' if config.touch.rotation == '270' }}>+270&deg; Korrektur (verdrehtes Panel)</option>
+              </select>
+            </label>
+          </div>
+          <small class="helper-text">
+            Bei <strong>Automatisch</strong> &uuml;bernimmt <code>xinput map-to-output</code> die Display-Drehung direkt. Eine Korrektur ist nur bei physisch verdreht eingebauten Touch-Panels n&ouml;tig.
+          </small>
+
+          <div class="row-actions">
+            <button
+              type="button"
+              id="btn-touch-test"
+              class="outline {{ 'active-test' if hardware.system.touch_test_active }}"
+              data-active="{{ 'true' if hardware.system.touch_test_active else 'false' }}"
+            >
+              {% if hardware.system.touch_test_active %}
+                Touch-Ecken-Test beenden
+              {% else %}
+                Touch-Ecken-Test starten
+              {% endif %}
+            </button>
+          </div>
+        </div>
+      </details>
+
+      <!-- 5. Audio-Ausgabe -->
+      <details class="section-card" data-section="audio">
+        <summary>
+          <span class="summary-title">5. Audio-Ausgabe</span>
+          <span class="summary-meta" id="meta-audio">{{ config.audio.volume }} %</span>
+        </summary>
+        <div class="section-body">
+          <div id="audio-alert" class="hw-alert" {% if hardware.audio.available and hardware.audio.cards %}hidden{% endif %}>
+            {% if not hardware.audio.available %}
+              PipeWire / pactl derzeit nicht erreichbar: {{ hardware.audio.error }}
+            {% else %}
+              Keine Soundkarten erkannt.
+            {% endif %}
+          </div>
+
+          <div class="grid">
+            <label for="audio-card">
+              Soundkarte
+              <select id="audio-card" name="audio_card"></select>
+            </label>
+
+            <label for="audio-profile">
+              Ausgabe-Profil (HDMI vs. Line-Out)
+              <select id="audio-profile" name="audio_profile"></select>
+            </label>
+          </div>
+
+          <div>
+            <div class="volume-header">
+              <label for="audio-volume" style="margin: 0;">Lautst&auml;rke</label>
+              <span class="volume-value" id="audio-volume-label">{{ config.audio.volume }} %</span>
+            </div>
+            <input
+              type="range"
+              id="audio-volume"
+              name="audio_volume"
+              min="0"
+              max="100"
+              step="1"
+              value="{{ config.audio.volume }}"
+            >
+          </div>
+
+          <div class="row-actions">
+            <button type="button" id="btn-test-audio" class="secondary outline">
+              Test-Ton abspielen
+            </button>
+          </div>
+        </div>
+      </details>
 
       <!-- Speichern-Leiste -->
       <div class="save-bar">
@@ -565,42 +841,54 @@
       </div>
     </form>
 
-    <!-- 5. System & Updates -->
-    <article class="card" style="margin-top: 1.5rem;">
-      <header>
-        <h2>5. System &amp; Updates</h2>
-        <small id="update-header-ver">{{ hardware.system.version_display }} &middot; Branch <code>{{ hardware.system.branch }}</code></small>
-      </header>
-
-      <div id="update-status-box" class="net-strip" style="flex-direction: column; gap: 0.4rem;">
-        <div>
-          <strong>Installierte Version:</strong>
-          <code>{{ hardware.system.version_display }}</code>
-          {% if hardware.system.commit_date %}
-          <small style="opacity: 0.75;">({{ hardware.system.commit_date }})</small>
-          {% endif %}
+    <!-- 6. System & Updates -->
+    <details class="section-card" data-section="updates" style="margin-top: 1.15rem;">
+      <summary>
+        <span class="summary-title">6. System &amp; Updates</span>
+        <span class="summary-meta" id="meta-updates">{{ hardware.system.version_display }} &middot; {{ hardware.system.branch }}</span>
+      </summary>
+      <div class="section-body">
+        <div id="update-status-box" class="net-strip" style="flex-direction: column; gap: 0.4rem;">
+          <div>
+            <strong>Installierte Version:</strong>
+            <code>{{ hardware.system.version_display }}</code>
+            {% if hardware.system.commit_date %}
+            <small style="opacity: 0.75;">({{ hardware.system.commit_date }})</small>
+            {% endif %}
+          </div>
+          <div id="update-status-text" style="opacity: 0.85;">
+            Klicke auf &bdquo;Nach Updates suchen&ldquo;, um den Stand auf GitHub zu pr&uuml;fen.
+          </div>
+          <ul id="update-changelog" hidden style="margin: 0.35rem 0 0 1.2rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem;"></ul>
         </div>
-        <div id="update-status-text" style="opacity: 0.85;">
-          Klicke auf &bdquo;Nach Updates suchen&ldquo;, um den Stand auf GitHub zu pr&uuml;fen.
-        </div>
-        <ul id="update-changelog" hidden style="margin: 0.35rem 0 0 1.2rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem;"></ul>
-      </div>
 
-      <div class="row-actions">
-        <button type="button" id="btn-check-update" class="secondary outline">
-          Nach Updates suchen
-        </button>
-        <button type="button" id="btn-apply-update" class="outline" disabled>
-          Update installieren
-        </button>
+        <div class="row-actions">
+          <button type="button" id="btn-check-update" class="secondary outline">
+            Nach Updates suchen
+          </button>
+          <button type="button" id="btn-apply-update" class="outline" disabled>
+            Update installieren
+          </button>
+        </div>
       </div>
-    </article>
+    </details>
   </main>
 
   <script>
     let currentConfig = {{ config | tojson }};
     let currentHardware = {{ hardware | tojson }};
+    const SCHEDULE_PRESETS = {{ schedule_presets | tojson }};
 
+    const DAY_DEFS = [
+      { key: "mon", label: "Mo" },
+      { key: "tue", label: "Di" },
+      { key: "wed", label: "Mi" },
+      { key: "thu", label: "Do" },
+      { key: "fri", label: "Fr" },
+      { key: "sat", label: "Sa" },
+      { key: "sun", label: "So" },
+    ];
+    const STORAGE_KEY_SECTIONS = "kiosx_open_sections_v1";
     const ID_ALPHABET = "23456789ABCDEFGHJKMNPQRSTVWXYZ";
     const $ = (id) => document.getElementById(id);
 
@@ -650,6 +938,231 @@
       return out;
     }
 
+    // -------------------------------------------------------------------------
+    // Einklappbare Bloecke (initial alles zu, ausser localStorage hat Zustand)
+    // -------------------------------------------------------------------------
+    const allSections = Array.from(document.querySelectorAll("details.section-card"));
+
+    function saveOpenSections() {
+      try {
+        const openKeys = allSections.filter((el) => el.open).map((el) => el.dataset.section);
+        localStorage.setItem(STORAGE_KEY_SECTIONS, JSON.stringify(openKeys));
+      } catch (_) {}
+    }
+
+    function restoreOpenSections() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY_SECTIONS);
+        if (!raw) return; // Initial: alles zugeklappt
+        const openKeys = JSON.parse(raw);
+        if (!Array.isArray(openKeys)) return;
+        allSections.forEach((el) => {
+          el.open = openKeys.includes(el.dataset.section);
+        });
+      } catch (_) {}
+    }
+
+    allSections.forEach((el) => el.addEventListener("toggle", saveOpenSections));
+
+    $("btn-expand-all").addEventListener("click", () => {
+      allSections.forEach((el) => { el.open = true; });
+      saveOpenSections();
+    });
+
+    $("btn-collapse-all").addEventListener("click", () => {
+      allSections.forEach((el) => { el.open = false; });
+      saveOpenSections();
+    });
+
+    function refreshSectionSummaries() {
+      $("meta-url").textContent = $("kiosk-url").value.trim() || "–";
+
+      const pOut = $("primary-output").value || "Auto";
+      const res = $("display-resolution").value || "auto";
+      const rotLabels = { normal: "0°", right: "90°", inverted: "180°", left: "270°" };
+      const rot = rotLabels[$("display-rotation").value] || "0°";
+      $("meta-display").textContent = `${pOut} · ${res} · ${rot}`;
+
+      const tDev = $("touch-device").value || "Kein Touch";
+      const tRot = $("touch-rotation").value === "auto" ? "Auto" : `+${$("touch-rotation").value}°`;
+      $("meta-touch").textContent = `${tDev} · ${tRot}`;
+
+      $("meta-audio").textContent = `${$("audio-volume").value} %`;
+    }
+
+    // -------------------------------------------------------------------------
+    // Zeitplan-Editor (Inhouse, Messe, Eigener Zeitplan, gemeinsam/getrennt)
+    // -------------------------------------------------------------------------
+    function renderDayEditor(target, daysData) {
+      const container = $(`days-${target}`);
+      container.innerHTML = "";
+      DAY_DEFS.forEach(({ key, label }) => {
+        const d = (daysData && daysData[key]) || { enabled: false, start: "08:00", end: "18:00" };
+        const row = document.createElement("div");
+        row.className = `day-row${d.enabled ? "" : " day-off"}`;
+        row.dataset.day = key;
+
+        row.innerHTML = `
+          <label>
+            <input type="checkbox" class="day-enabled" ${d.enabled ? "checked" : ""}>
+            <span>${label}</span>
+          </label>
+          <input type="time" class="day-start" value="${d.start || "08:00"}" ${d.enabled ? "" : "disabled"} aria-label="${label} Ein">
+          <span style="opacity:0.65; font-size:0.8rem;">&ndash;</span>
+          <input type="time" class="day-end" value="${d.end || "18:00"}" ${d.enabled ? "" : "disabled"} aria-label="${label} Aus">
+        `;
+
+        const chk = row.querySelector(".day-enabled");
+        const inpStart = row.querySelector(".day-start");
+        const inpEnd = row.querySelector(".day-end");
+
+        const onCustomChange = () => {
+          row.classList.toggle("day-off", !chk.checked);
+          inpStart.disabled = !chk.checked;
+          inpEnd.disabled = !chk.checked;
+          $(`schedule-preset-${target}`).value = "custom";
+        };
+
+        chk.addEventListener("change", onCustomChange);
+        inpStart.addEventListener("change", onCustomChange);
+        inpEnd.addEventListener("change", onCustomChange);
+
+        container.appendChild(row);
+      });
+    }
+
+    function readDayEditor(target) {
+      const container = $(`days-${target}`);
+      const days = {};
+      container.querySelectorAll(".day-row").forEach((row) => {
+        const key = row.dataset.day;
+        days[key] = {
+          enabled: row.querySelector(".day-enabled").checked,
+          start: row.querySelector(".day-start").value || "08:00",
+          end: row.querySelector(".day-end").value || "18:00",
+        };
+      });
+      return days;
+    }
+
+    function updateScheduleScopeUI() {
+      const isSep = $("schedule-scope").value === "separate";
+      $("schedule-box-secondary").hidden = !isSep;
+      $("power-test-target").hidden = !isSep;
+      $("schedule-primary-heading").textContent = isSep
+        ? "Primäres Display – Aktive Anzeigezeiten"
+        : "Aktive Anzeigezeiten (beide Displays gemeinsam)";
+    }
+
+    function updateScheduleStatusUI(ss) {
+      if (!ss) return;
+      $("sched-clock").textContent = `${ss.local_day} ${ss.local_time}`;
+      $("sched-tz-label").textContent = ss.timezone || "Europe/Vienna";
+      $("sched-state-p").textContent = ss.primary_on ? "Aktiv" : "Standby";
+
+      const sWrap = $("sched-state-s-wrap");
+      sWrap.hidden = !ss.has_secondary;
+      if (ss.has_secondary) {
+        $("sched-state-s").textContent = ss.secondary_on ? "Aktiv" : "Standby";
+      }
+
+      const nextWrap = $("sched-next-wrap");
+      if (ss.next_change_primary) {
+        $("sched-next").textContent = ss.next_change_primary;
+        nextWrap.hidden = false;
+      } else {
+        nextWrap.hidden = true;
+      }
+
+      $("sched-override-wrap").hidden = !ss.override_active;
+      $("badge-schedule").innerHTML = `<span class="dot ${ss.all_off ? "warn" : "ok"}"></span>${ss.all_off ? "Standby" : "Aktiv"}`;
+
+      if (!ss.enabled && !ss.override_active) {
+        $("meta-schedule").textContent = "Deaktiviert (immer ein)";
+      } else {
+        const stateTxt = ss.all_off ? "Standby" : "Aktiv";
+        const suffix = ss.next_change_primary ? ` · ${ss.next_change_primary}` : "";
+        const ovTxt = ss.override_active ? " [Manuell]" : "";
+        $("meta-schedule").textContent = `${stateTxt}${ovTxt}${suffix}`;
+      }
+    }
+
+    function initScheduleUI() {
+      const sched = currentConfig.schedule || {};
+      $("schedule-enabled").checked = Boolean(sched.enabled);
+      $("schedule-scope").value = sched.scope || "both";
+      $("schedule-timezone").value = sched.timezone || "Europe/Vienna";
+      $("schedule-preset-primary").value = (sched.primary && sched.primary.preset) || "inhouse";
+      $("schedule-preset-secondary").value = (sched.secondary && sched.secondary.preset) || "inhouse";
+
+      renderDayEditor("primary", (sched.primary && sched.primary.days) || SCHEDULE_PRESETS.inhouse);
+      renderDayEditor("secondary", (sched.secondary && sched.secondary.days) || SCHEDULE_PRESETS.inhouse);
+      updateScheduleScopeUI();
+      if (currentHardware.system && currentHardware.system.schedule_status) {
+        updateScheduleStatusUI(currentHardware.system.schedule_status);
+      }
+    }
+
+    $("schedule-scope").addEventListener("change", updateScheduleScopeUI);
+
+    document.querySelectorAll("select[data-preset-target]").forEach((sel) => {
+      sel.addEventListener("change", (e) => {
+        const target = e.target.dataset.presetTarget;
+        const preset = e.target.value;
+        if (SCHEDULE_PRESETS[preset]) {
+          renderDayEditor(target, SCHEDULE_PRESETS[preset]);
+        }
+      });
+    });
+
+    document.querySelectorAll("button[data-copy-days]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const target = btn.dataset.target;
+        const mode = btn.dataset.copyDays;
+        const days = readDayEditor(target);
+        const mon = days.mon || { enabled: true, start: "08:00", end: "18:00" };
+        const destKeys = mode === "weekdays"
+          ? ["mon", "tue", "wed", "thu", "fri"]
+          : DAY_DEFS.map((d) => d.key);
+        destKeys.forEach((k) => {
+          days[k] = { enabled: mon.enabled, start: mon.start, end: mon.end };
+        });
+        renderDayEditor(target, days);
+        $(`schedule-preset-${target}`).value = "custom";
+        showToast(mode === "weekdays" ? "Montag auf Mo–Fr übertragen." : "Montag auf alle Tage übertragen.", "info");
+      });
+    });
+
+    async function triggerDisplayPower(action, btn) {
+      const target = $("schedule-scope").value === "separate" ? $("power-test-target").value : "both";
+      setBusy(btn, true, "Schalte...");
+      try {
+        const res = await fetch("/api/display-power", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, target }),
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+          if (data.schedule_status) updateScheduleStatusUI(data.schedule_status);
+          showToast(data.message, "success");
+        } else {
+          showToast(data.message || "Schaltbefehl fehlgeschlagen.", "error", (data.warnings || []).join("\n"));
+        }
+      } catch (err) {
+        showToast(`Netzwerkfehler: ${err.message}`, "error");
+      } finally {
+        setBusy(btn, false);
+      }
+    }
+
+    $("btn-power-off").addEventListener("click", (e) => triggerDisplayPower("off", e.currentTarget));
+    $("btn-power-on").addEventListener("click", (e) => triggerDisplayPower("on", e.currentTarget));
+    $("btn-power-auto").addEventListener("click", (e) => triggerDisplayPower("auto", e.currentTarget));
+
+    // -------------------------------------------------------------------------
+    // Hardware-Auswahllisten (Displays, Touch, Audio)
+    // -------------------------------------------------------------------------
     function populateDisplays(selectedPrimary, selectedRes, selectedSecondary) {
       const displays = (currentHardware.displays && currentHardware.displays.displays) || [];
       const primarySel = $("primary-output");
@@ -896,13 +1409,22 @@
       );
       populateTouchDevices(currentConfig.touch.device);
       populateAudioCards(currentConfig.audio.card, currentConfig.audio.profile);
+      initScheduleUI();
       updateStatusBadges();
+      refreshSectionSummaries();
+      restoreOpenSections();
     }
 
     // Event-Listener
     $("primary-output").addEventListener("change", (e) => {
       populateResolutions(e.target.value, "auto");
+      refreshSectionSummaries();
     });
+    $("display-resolution").addEventListener("change", refreshSectionSummaries);
+    $("display-rotation").addEventListener("change", refreshSectionSummaries);
+    $("touch-device").addEventListener("change", refreshSectionSummaries);
+    $("touch-rotation").addEventListener("change", refreshSectionSummaries);
+    $("kiosk-url").addEventListener("input", refreshSectionSummaries);
 
     $("audio-card").addEventListener("change", (e) => {
       const card = (currentHardware.audio.cards || []).find((c) => c.name === e.target.value);
@@ -912,6 +1434,7 @@
 
     $("audio-volume").addEventListener("input", (e) => {
       $("audio-volume-label").textContent = `${e.target.value} %`;
+      refreshSectionSummaries();
     });
 
     $("btn-gen-id").addEventListener("click", () => {
@@ -946,6 +1469,19 @@
           profile: $("audio-profile").value,
           volume: parseInt($("audio-volume").value, 10) || 0,
         },
+        schedule: {
+          enabled: $("schedule-enabled").checked,
+          timezone: $("schedule-timezone").value,
+          scope: $("schedule-scope").value,
+          primary: {
+            preset: $("schedule-preset-primary").value,
+            days: readDayEditor("primary"),
+          },
+          secondary: {
+            preset: $("schedule-preset-secondary").value,
+            days: readDayEditor("secondary"),
+          },
+        },
       };
 
       try {
@@ -964,9 +1500,11 @@
             $("device-id").value = currentConfig.device_id;
             $("header-device-id").textContent = currentConfig.device_id;
           }
-          if (data.info && data.info.mdns_url) {
-            $("info-mdns").textContent = data.info.mdns_url;
+          if (data.info) {
+            if (data.info.mdns_url) $("info-mdns").textContent = data.info.mdns_url;
+            if (data.info.schedule_status) updateScheduleStatusUI(data.info.schedule_status);
           }
+          refreshSectionSummaries();
           const warnText = (data.warnings || []).join("\n");
           showToast(data.message || "Gespeichert.", warnText ? "warning" : "success", warnText);
         }
@@ -1057,7 +1595,11 @@
           populateTouchDevices(prevTouch);
           populateAudioCards(prevCard, prevProf);
           updateStatusBadges();
+          if (currentHardware.system && currentHardware.system.schedule_status) {
+            updateScheduleStatusUI(currentHardware.system.schedule_status);
+          }
           updateTouchTestButton(Boolean(currentHardware.system && currentHardware.system.touch_test_active));
+          refreshSectionSummaries();
           showToast("Hardware-Listen wurden aktualisiert.", "info");
         } else {
           showToast("Hardware konnte nicht aktualisiert werden.", "error");
@@ -1070,7 +1612,7 @@
     });
 
     // Update-Pruefung & Installation
-    async function waitForServerBackOnline(prevCommit, maxTries = 35) {
+    async function waitForServerBackOnline(maxTries = 35) {
       for (let i = 0; i < maxTries; i++) {
         await new Promise((r) => setTimeout(r, 1500));
         try {
@@ -1154,7 +1696,7 @@
         statusEl.textContent = data.message;
         showToast(data.message, "info");
         if (data.restarting) {
-          await waitForServerBackOnline(data.new_commit || "");
+          await waitForServerBackOnline();
         } else {
           setBusy(btn, false);
         }

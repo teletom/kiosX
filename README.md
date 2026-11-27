@@ -45,7 +45,7 @@ Systemstart (Ubuntu Server minimized)
 ### Repository (`/opt/kiosX`)
 ```text
 /opt/kiosX/
-├── VERSION                    # Semantische Versionsnummer (aktuell 1.1.1)
+├── VERSION                    # Semantische Versionsnummer (aktuell 1.2.0)
 ├── install.sh                 # Idempotentes Installations- & Update-Skript
 ├── kiosx                      # SSH-faehiges CLI-Tool (verlinkt als /usr/local/bin/kiosx)
 ├── kiosk-watchdog.sh          # Chromium-Watchdog-Schleife (POSIX sh, Pause-Flag-faehig)
@@ -127,6 +127,17 @@ Die Datei wird von `app.py` ueber `NamedTemporaryFile` + `fsync` + `os.replace` 
 | `audio.card` | PipeWire/PulseAudio-Kartenname aus `pactl list cards` |
 | `audio.profile` | Karten-Profil (z. B. `output:hdmi-stereo`, `output:analog-stereo`) |
 | `audio.volume` | Ganzzahl `0`–`100` (in Prozent) |
+| `schedule.enabled` | `true`/`false` – aktiviert zeitgesteuerten Monitor-Standby (inkl. Touch-Sperre & Audio-Mute) |
+| `schedule.timezone` | IANA-Zeitzone (Standard: `"Europe/Vienna"`, inkl. Sommer-/Winterzeit) |
+| `schedule.scope` | `"both"` (beide Displays gemeinsam) oder `"separate"` (Primär & Sekundär getrennt) |
+| `schedule.primary` / `secondary` | `{ preset: "inhouse"\|"messe"\|"custom", days: { mon..sun: { enabled, start, end } } }` |
+
+### Fertige Zeitplan-Vorlagen
+- **Inhouse:** Mo–Do `07:15–16:45`, Fr `07:15–12:15`, Sa–So Standby
+- **Messe:** Mo–So `08:00–18:00`
+- **Eigener Zeitplan:** Frei pro Wochentag (auch Über-Mitternacht-Fenster wie `22:00–06:00` werden unterstützt)
+
+> Beim Übergang in den Standby wird Touch (`xinput disable`) gesperrt und Audio stummgeschaltet; beim Wiedereinschalten wird nach `xset dpms force on` automatisch `kiosk-apply.sh` ausgeführt, sodass Auflösung, Drehung, Wallpaper, Touch-Kalibrierung und Audio-Lautstärke vollständig wiederhergestellt werden.
 
 ---
 
@@ -211,6 +222,7 @@ Alle Hardware-Aufrufe laufen mit `LC_ALL=C`, `DISPLAY=:0`, `XAUTHORITY` und `XDG
 | `POST /test-audio` | Spielt Stereo-Testton ueber den aktiven Ausgang ab |
 | `POST /touch-test` | Oeffnet/schliesst das Touch-Test-Vollbildfenster (`{"action": "toggle"\|"start"\|"stop"}`) |
 | `POST /restart-browser` | Hebt eventuelle `kiosx stop`-Pause auf und beendet Chromium fuer sauberen Watchdog-Neustart |
+| `POST /api/display-power` | Manuelles Ein-/Ausschalten oder Zeitplan-Automatik (`{"action": "on"\|"off"\|"auto", "target": "both"\|"primary"\|"secondary"}`) |
 | `GET /api/update/check` | Prueft per `git fetch origin` auf neue Versionen/Commits inkl. Changelog |
 | `POST /api/update/apply` | Fuehrt `git pull --ff-only` aus und startet im Hintergrund `kiosk-ui.service` (oder `install.sh --skip-netplan`, falls `install.sh` geaendert wurde) neu |
 
@@ -226,6 +238,9 @@ kiosx start                     # Startet Chromium Kiosk-Browser (hebt Pause auf
 kiosx stop                      # Stoppt Browser dauerhaft (Watchdog pausiert, Hintergrundbild sichtbar)
 kiosx restart                   # Startet Chromium sauber neu (inkl. Start-Anzeige /splash)
 kiosx apply                     # Wendet /etc/kiosk/config.json sofort live an (xrandr/feh/xinput/pactl)
+kiosx display off               # Monitor sofort in Standby (Touch aus, Audio stumm)
+kiosx display on                # Monitor sofort einschalten (stellt Aufloesung, Touch & Audio wieder her)
+kiosx display auto              # Zurueck zur Zeitplan-Automatik
 kiosx url                       # Aktuelle Kiosk-URL anzeigen
 kiosx url https://example.com   # Neue Kiosk-URL atomar setzen und Browser neu starten
 kiosx id                        # 4-stellige Kiosk-ID & Verbindungs-URLs anzeigen
